@@ -1,18 +1,19 @@
 @echo off
-:: build_exe.bat — Build a standalone SteamUnlock.exe (no Python needed to run it)
-:: Requires PyInstaller: pip install pyinstaller
+:: build_exe.bat — Build SteamUnlock.exe (standalone, no Python needed)
 
-echo Building SteamUnlock.exe...
+echo ============================================================
+echo   Building SteamUnlock.exe
+echo ============================================================
 echo.
 
 pip install pyinstaller >nul 2>&1
 
 pyinstaller ^
     --onefile ^
-    --console ^
+    --noconsole ^
     --name SteamUnlock ^
-    --add-data "..\SteamToolbox\assets\data\depotkeys.json;assets" ^
-    "%~dp0steamunlock.py"
+    --icon NONE ^
+    "%~dp0SteamUnlock_GUI.pyw"
 
 if errorlevel 1 (
     echo.
@@ -23,12 +24,8 @@ if errorlevel 1 (
 
 echo.
 echo ============================================================
-echo   Build complete!
-echo   Executable: %~dp0dist\SteamUnlock.exe
-echo.
-echo   You can copy SteamUnlock.exe anywhere and run it standalone.
-echo   The .bat files will also work if you put SteamUnlock.exe
-echo   next to them and change 'python steamunlock.py' to 'SteamUnlock.exe'
+echo   Done! Executable: %~dp0dist\SteamUnlock.exe
+echo   Copy SteamUnlock.exe anywhere and double-click to run.
 echo ============================================================
 echo.
 pause
