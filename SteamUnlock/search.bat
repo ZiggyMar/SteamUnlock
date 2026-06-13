@@ -1,6 +1,6 @@
 @echo off
 set PYTHONUTF8=1
-:: search.bat — Search for a game by name to find its AppID
+:: search.bat - Search for a game by name to find its AppID
 :: Usage: search.bat elden ring
 ::        search.bat "counter-strike"
 

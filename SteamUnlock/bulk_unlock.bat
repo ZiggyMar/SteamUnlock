@@ -1,9 +1,9 @@
 @echo off
 set PYTHONUTF8=1
-:: bulk_unlock.bat — Unlock many games at once from a text file
+:: bulk_unlock.bat - Unlock many games at once from a text file
 :: Usage: bulk_unlock.bat appids.txt
 ::
-:: appids.txt format — one AppID per line:
+:: appids.txt format - one AppID per line:
 ::   730
 ::   570
 ::   440

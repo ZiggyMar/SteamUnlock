@@ -170,7 +170,7 @@ def parse_vdf_keys(content: str) -> Dict[str, str]:
         # Quoted string token(s) on one line
         tokens = re.findall(r'"([^"]*)"', line)
         if len(tokens) == 1:
-            # standalone key (section header) — could be a depot ID
+            # standalone key (section header) - could be a depot ID
             if tokens[0].isdigit():
                 current_depot = tokens[0]
         elif len(tokens) == 2:
@@ -686,7 +686,7 @@ async def interactive(cfg: dict):
             break
 
         elif choice == "1":
-            raw = input("  AppID(s) — space separated: ").strip()
+            raw = input("  AppID(s) - space separated: ").strip()
             for app_id in raw.split():
                 if app_id.isdigit():
                     await unlock(app_id, cfg)
@@ -761,9 +761,9 @@ async def interactive(cfg: dict):
             print(f"\n  Config file: {CONFIG_FILE}")
             print(json.dumps(cfg, indent=2))
             print("\n  Available keys:")
-            print("    github_token  — GitHub personal token (empty = 60 req/hr limit)")
-            print("    steam_path    — Full path to Steam install (auto-detected if blank)")
-            print("    output_mode   — 'auto' (install to Steam) or 'local' (save here)")
+            print("    github_token  - GitHub personal token (empty = 60 req/hr limit)")
+            print("    steam_path    - Full path to Steam install (auto-detected if blank)")
+            print("    output_mode   - 'auto' (install to Steam) or 'local' (save here)")
             print()
             k = input("  Key to change (or Enter to skip): ").strip()
             if k:
@@ -783,7 +783,7 @@ async def interactive(cfg: dict):
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="steamunlock",
-        description=f"SteamUnlock v{VERSION} — Unified Steam manifest tool",
+        description=f"SteamUnlock v{VERSION} - Unified Steam manifest tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

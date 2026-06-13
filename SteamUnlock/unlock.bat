@@ -1,6 +1,6 @@
 @echo off
 set PYTHONUTF8=1
-:: unlock.bat — Unlock a game by AppID
+:: unlock.bat - Unlock a game by AppID
 :: Usage: unlock.bat <AppID> [AppID2 ...]
 :: Example: unlock.bat 730
 ::          unlock.bat 730 570 440

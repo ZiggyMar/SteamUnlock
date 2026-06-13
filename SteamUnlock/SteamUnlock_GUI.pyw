@@ -421,7 +421,7 @@ async def unlock_app(app_id: str, cfg: dict, log_cb) -> bool:
     if not manifests:
         log_cb(f"No manifests found for {app_id} in any of the {len(GITHUB_REPOS)} repos.", "error")
         log_cb("Tips: add a GitHub token in Settings (enables live search of ALL public repos),", "dim")
-        log_cb("or wait a day — community repos auto-update as people upload.", "dim")
+        log_cb("or wait a day - community repos auto-update as people upload.", "dim")
         return False
 
     steam_path = get_steam_path(cfg)
@@ -514,10 +514,10 @@ def set_launch_with_steam(value: bool) -> bool:
                                0, winreg.KEY_SET_VALUE)
         if value:
             if getattr(sys, "frozen", False):
-                # Running as compiled exe — register the exe path directly
+                # Running as compiled exe - register the exe path directly
                 exe_cmd = f'"{sys.executable}"'
             else:
-                # Running from source — find pythonw.exe next to python.exe
+                # Running from source - find pythonw.exe next to python.exe
                 pythonw = Path(sys.executable).with_name("pythonw.exe")
                 if not pythonw.exists():
                     pythonw = Path(sys.executable)   # fallback to python.exe
@@ -808,7 +808,7 @@ class Workspace:
             b.bind("<Leave>", lambda e: b.configure(bg=ST_HEADER, fg=ST_DIM))
             return b
         ctl("✕", self.win.destroy, "#c4314b")
-        ctl("—", lambda: self.win.withdraw(), ST_HOVER)
+        ctl("-", lambda: self.win.withdraw(), ST_HOVER)
 
         # make the title bar drag the window
         for w in (header, logo):
@@ -1013,7 +1013,7 @@ class Workspace:
                                        values=(appid, name or f"App {appid}"))
                 self.tree.selection_set(row)
                 self.tree.focus(row)
-                self.log(f"Ready: {name or appid} — click 'Unlock Selected'.", "ok")
+                self.log(f"Ready: {name or appid} - click 'Unlock Selected'.", "ok")
 
             self.app.run_async(resolve_name(appid), _resolved)
             return
@@ -1121,7 +1121,7 @@ class FloatingApp:
                 except Exception:
                     continue
         except ImportError:
-            # Pillow not available — fall back to raw PhotoImage (may look pixelated)
+            # Pillow not available - fall back to raw PhotoImage (may look pixelated)
             try:
                 self._logo_img = tk.PhotoImage(file=asset_path("logo_52.png"))
             except Exception:
@@ -1388,7 +1388,7 @@ class FloatingApp:
 
     def open_settings(self):
         win = tk.Toplevel(self.root)
-        win.title("  SteamUnlock — Settings")
+        win.title("  SteamUnlock - Settings")
         win.geometry("520x320")
         win.configure(bg=ST_BG)
         win.resizable(False, False)
@@ -1410,7 +1410,7 @@ class FloatingApp:
         pad = tk.Frame(win, bg=ST_BG, padx=20, pady=16)
         pad.pack(fill="both", expand=True)
 
-        lbl("GitHub Personal Token (optional — 5000 req/hr vs 60 without):")
+        lbl("GitHub Personal Token (optional - 5000 req/hr vs 60 without):")
         token_e = entry(self.cfg.get("github_token", ""))
         # show where the token currently comes from
         env_path = SCRIPT_DIR / ".env"

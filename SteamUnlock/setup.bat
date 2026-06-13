@@ -1,5 +1,5 @@
 @echo off
-:: setup.bat — First-time setup
+:: setup.bat - First-time setup
 :: Installs required Python packages and optionally builds the .exe
 
 echo ============================================================
@@ -31,10 +31,10 @@ echo ============================================================
 echo   Setup complete!
 echo.
 echo   Quick start:
-echo     Double-click steamunlock.bat     — interactive menu
-echo     unlock.bat 730                   — unlock CS2
-echo     search.bat "elden ring"          — search by name
-echo     bulk_unlock.bat appids.txt       — unlock many at once
+echo     Double-click steamunlock.bat     - interactive menu
+echo     unlock.bat 730                   - unlock CS2
+echo     search.bat "elden ring"          - search by name
+echo     bulk_unlock.bat appids.txt       - unlock many at once
 echo ============================================================
 echo.
 

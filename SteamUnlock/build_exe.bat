@@ -1,5 +1,5 @@
 @echo off
-:: build_exe.bat — Build SteamUnlock.exe (standalone, no Python needed)
+:: build_exe.bat - Build SteamUnlock.exe (standalone, no Python needed)
 
 echo ============================================================
 echo   Building SteamUnlock.exe
