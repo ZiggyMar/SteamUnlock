@@ -13,3 +13,8 @@ SteamUnlock/[[]*[]]*/
 # OS
 Thumbs.db
 desktop.ini
+
+# SteamTools installer (not ours, don't commit)
+*.exe
+# except our actual release binary if someone manually adds it
+!dist/SteamUnlock.exe
