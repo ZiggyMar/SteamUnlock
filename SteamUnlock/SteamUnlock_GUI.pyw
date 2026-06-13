@@ -352,274 +352,581 @@ def dump_keys_from_depotcache(dc: Path, log_cb) -> Dict[str, str]:
             log_cb(f"Error reading {vdf_path.name}: {e}", "error")
     return all_keys
 
-# ─── GUI ──────────────────────────────────────────────────────────────────────
+# ─── SteamTools registry toggles ──────────────────────────────────────────────
+# These map to the real SteamTools kernel settings under HKCU\Software\Valve\Steamtools
+# so the toggles in the menu actually control SteamTools behaviour.
 
-class SteamUnlockApp:
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        self.cfg  = load_config()
+ST_REG_PATH = r"Software\Valve\Steamtools"
+
+def get_st_toggle(name: str) -> bool:
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ST_REG_PATH)
+        v, _ = winreg.QueryValueEx(k, name)
+        winreg.CloseKey(k)
+        return bool(v)
+    except Exception:
+        return False
+
+def set_st_toggle(name: str, value: bool) -> bool:
+    try:
+        import winreg
+        k = winreg.CreateKey(winreg.HKEY_CURRENT_USER, ST_REG_PATH)
+        winreg.SetValueEx(k, name, 0, winreg.REG_DWORD, 1 if value else 0)
+        winreg.CloseKey(k)
+        return True
+    except Exception:
+        return False
+
+def get_launch_with_steam() -> bool:
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                           r"Software\Microsoft\Windows\CurrentVersion\Run")
+        winreg.QueryValueEx(k, "SteamUnlock")
+        winreg.CloseKey(k)
+        return True
+    except Exception:
+        return False
+
+def set_launch_with_steam(value: bool) -> bool:
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                           r"Software\Microsoft\Windows\CurrentVersion\Run", 0,
+                           winreg.KEY_SET_VALUE)
+        if value:
+            exe = sys.executable if getattr(sys, "frozen", False) else \
+                  f'pythonw "{Path(__file__).parent / "SteamUnlock_GUI.pyw"}"'
+            winreg.SetValueEx(k, "SteamUnlock", 0, winreg.REG_SZ, exe)
+        else:
+            try:
+                winreg.DeleteValue(k, "SteamUnlock")
+            except FileNotFoundError:
+                pass
+        winreg.CloseKey(k)
+        return True
+    except Exception:
+        return False
+
+# ─── SteamTools-style palette ─────────────────────────────────────────────────
+
+ST_BG       = "#1e2127"   # panel background
+ST_BG2      = "#262a31"   # card / row background
+ST_MENU_BG  = "#23262b"   # menu background
+ST_HOVER    = "#33373f"   # hover highlight
+ST_TEXT     = "#e8eaed"
+ST_DIM      = "#8b919b"
+ST_ICON     = "#5aa9e6"   # icon accent (Steam blue)
+ST_SEP      = "#34383f"
+ST_GREEN    = "#5cb85c"
+ST_OFF      = "#4a4f57"
+ST_ACCENT   = "#1a9fff"
+KEY_COLOR   = "#ff00ff"   # transparency key for the floating icon
+
+ICON_SIZE   = 78          # floating icon diameter (px)
+
+
+# ─── Custom dark fly-out menu (SteamTools style) ──────────────────────────────
+
+class MenuController:
+    """SteamTools-style right-click menu built on the native tk.Menu (robust:
+    handles hover, submenus, click-away and on-screen positioning automatically),
+    themed dark with emoji icons and green check toggles."""
+
+    def __init__(self, app):
+        self.app = app
+        self.root = app.root
+        self._menu = None
+        self._toggle_vars = {}
+
+    def _new_menu(self):
+        return tk.Menu(
+            self.root, tearoff=0,
+            bg=ST_MENU_BG, fg=ST_TEXT,
+            activebackground=ST_ACCENT, activeforeground="white",
+            disabledforeground=ST_DIM,
+            bd=0, relief="flat", activeborderwidth=0,
+            font=("Microsoft YaHei UI", 10),
+        )
+
+    def _build(self, items):
+        m = self._new_menu()
+        for item in items:
+            if item.get("sep"):
+                m.add_separator()
+                continue
+            icon = item.get("icon", "")
+            label = f"  {icon}  {item['label']}" if icon else f"  {item['label']}"
+            if "submenu" in item:
+                sub = self._build(item["submenu"])
+                m.add_cascade(label=label + "    ", menu=sub)
+            elif "toggle" in item:
+                var = tk.BooleanVar(value=item["toggle"]["get"]())
+                self._toggle_vars[item["label"]] = var
+
+                def _cb(it=item, v=var):
+                    it["toggle"]["set"](v.get())
+
+                m.add_checkbutton(
+                    label=label, variable=var, command=_cb,
+                    onvalue=True, offvalue=False, selectcolor=ST_GREEN,
+                )
+            else:
+                state = "normal" if item.get("enabled", True) else "disabled"
+                m.add_command(label=label, state=state,
+                              command=item.get("action") or (lambda: None))
+        return m
+
+    def show(self, items, x, y, open_left=True):
+        self.close()
+        self._toggle_vars = {}
+        self._menu = self._build(items)
+        # tk_popup auto-adjusts to stay on-screen and opens leftward near the
+        # right edge, which matches the floating icon sitting bottom-right.
+        try:
+            self._menu.tk_popup(int(x), int(y))
+        finally:
+            self._menu.grab_release()
+
+    def close(self):
+        if self._menu is not None:
+            try:
+                self._menu.unpost()
+                self._menu.destroy()
+            except tk.TclError:
+                pass
+            self._menu = None
+
+
+# ─── Workspace window (the actual tool) ───────────────────────────────────────
+
+class Workspace:
+    """The main tool surface, opened from the floating icon. SteamTools-dark themed."""
+
+    def __init__(self, app):
+        self.app = app
+        self.cfg = app.cfg
+        self.win = None
         self._search_results: List[dict] = []
-        self._busy = False
 
-        self._setup_window()
-        self._build_ui()
-        self._check_steam()
+    def show(self, focus="search"):
+        if self.win and tk.Toplevel.winfo_exists(self.win):
+            self.win.deiconify()
+            self.win.lift()
+            self.win.focus_force()
+            return
+        self._build()
 
-    # ── Window setup ──────────────────────────────────────────────────────────
+    def _build(self):
+        self.win = tk.Toplevel(self.app.root)
+        self.win.title("SteamUnlock")
+        self.win.configure(bg=ST_BG)
+        self.win.geometry("760x560")
+        self.win.minsize(680, 480)
 
-    def _setup_window(self):
-        self.root.title(f"SteamUnlock v{VERSION}")
-        self.root.geometry("820x680")
-        self.root.minsize(700, 560)
-        self.root.configure(bg=BG)
-        self.root.resizable(True, True)
+        style = ttk.Style(self.win)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure("ST.Treeview", background="#14171c", foreground=ST_TEXT,
+                        fieldbackground="#14171c", rowheight=26,
+                        font=("Microsoft YaHei UI", 10), borderwidth=0)
+        style.configure("ST.Treeview.Heading", background=ST_BG2, foreground=ST_DIM,
+                        font=("Microsoft YaHei UI", 9, "bold"), borderwidth=0)
+        style.map("ST.Treeview", background=[("selected", ST_ACCENT)],
+                  foreground=[("selected", "white")])
+        style.configure("ST.Vertical.TScrollbar", background=ST_BG2,
+                        troughcolor=ST_BG, arrowcolor=ST_DIM, borderwidth=0)
 
-        # ttk style
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure(".", background=BG, foreground=TEXT, borderwidth=0,
-                        focuscolor=ACCENT, font=("Segoe UI", 10))
-        style.configure("TFrame", background=BG)
-        style.configure("Card.TFrame", background=BG2, relief="flat")
-        style.configure("TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 10))
-        style.configure("Dim.TLabel", background=BG2, foreground=TEXT_DIM, font=("Segoe UI", 9))
-        style.configure("Head.TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 11, "bold"))
-        style.configure("Status.TLabel", background=BG3, foreground=TEXT_DIM, font=("Segoe UI", 9))
-        style.configure("Accent.TButton", background=ACCENT, foreground="white",
-                        font=("Segoe UI", 10, "bold"), borderwidth=0, padding=(14, 6))
-        style.map("Accent.TButton",
-                  background=[("active", "#c73652"), ("disabled", "#555")])
-        style.configure("TButton", background=BG3, foreground=TEXT,
-                        font=("Segoe UI", 10), borderwidth=0, padding=(12, 6))
-        style.map("TButton",
-                  background=[("active", "#1e4d70"), ("disabled", "#333")])
-        style.configure("Treeview", background=ENTRY_BG, foreground=TEXT,
-                        fieldbackground=ENTRY_BG, rowheight=26,
-                        font=("Segoe UI", 10), borderwidth=0)
-        style.configure("Treeview.Heading", background=BG3, foreground=TEXT,
-                        font=("Segoe UI", 10, "bold"), borderwidth=0)
-        style.map("Treeview", background=[("selected", BG3)], foreground=[("selected", ACCENT2)])
-        style.configure("TEntry", fieldbackground=ENTRY_BG, foreground=TEXT,
-                        insertcolor=TEXT, borderwidth=1, relief="flat")
-        style.configure("TScrollbar", background=BG2, troughcolor=BG,
-                        arrowcolor=TEXT_DIM, borderwidth=0)
-
-    # ── UI construction ───────────────────────────────────────────────────────
-
-    def _build_ui(self):
-        # ── Header ────────────────────────────────────────────────────────────
-        header = tk.Frame(self.root, bg=BG3, height=52)
+        # Header
+        header = tk.Frame(self.win, bg="#16191e", height=46)
         header.pack(fill="x")
         header.pack_propagate(False)
+        tk.Canvas(header, width=24, height=24, bg="#16191e",
+                  highlightthickness=0).pack(side="left", padx=(14, 8))
+        tk.Label(header, text="SteamUnlock", bg="#16191e", fg=ST_TEXT,
+                 font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
+        tk.Label(header, text=f"v{VERSION}", bg="#16191e", fg=ST_DIM,
+                 font=("Segoe UI", 9)).pack(side="left", padx=6)
 
-        tk.Label(header, text="⚡  SteamUnlock", bg=BG3, fg=TEXT,
-                 font=("Segoe UI", 15, "bold")).pack(side="left", padx=18, pady=8)
-        tk.Label(header, text=f"v{VERSION}", bg=BG3, fg=TEXT_DIM,
-                 font=("Segoe UI", 9)).pack(side="left", pady=8)
+        body = tk.Frame(self.win, bg=ST_BG)
+        body.pack(fill="both", expand=True, padx=12, pady=10)
 
-        btn_settings = tk.Button(header, text="⚙ Settings", bg=BG3, fg=TEXT_DIM,
-                                 font=("Segoe UI", 9), bd=0, cursor="hand2",
-                                 activebackground=BG, activeforeground=TEXT,
-                                 command=self._open_settings)
-        btn_settings.pack(side="right", padx=16, pady=10)
-
-        # ── Main body ─────────────────────────────────────────────────────────
-        body = ttk.Frame(self.root)
-        body.pack(fill="both", expand=True, padx=14, pady=10)
-
-        # Left column
-        left = ttk.Frame(body)
+        left = tk.Frame(body, bg=ST_BG)
         left.pack(side="left", fill="both", expand=True)
-
-        # Right column (log)
-        right = ttk.Frame(body, style="Card.TFrame")
+        right = tk.Frame(body, bg=ST_BG2)
         right.pack(side="right", fill="both", expand=True, padx=(10, 0))
 
-        self._build_search_panel(left)
-        self._build_quick_panel(left)
-        self._build_tools_panel(left)
-        self._build_log_panel(right)
+        self._build_search(left)
+        self._build_quick(left)
+        self._build_tools(left)
+        self._build_log(right)
 
-        # ── Status bar ────────────────────────────────────────────────────────
+        # status
+        sb = tk.Frame(self.win, bg="#16191e", height=24)
+        sb.pack(fill="x", side="bottom")
+        sb.pack_propagate(False)
         self.status_var = tk.StringVar(value="Ready")
-        status_bar = tk.Frame(self.root, bg=BG3, height=26)
-        status_bar.pack(fill="x", side="bottom")
-        status_bar.pack_propagate(False)
-        self.status_lbl = tk.Label(status_bar, textvariable=self.status_var,
-                                   bg=BG3, fg=TEXT_DIM, font=("Segoe UI", 9),
-                                   anchor="w")
-        self.status_lbl.pack(side="left", padx=12, fill="y")
-        self.steam_lbl = tk.Label(status_bar, text="", bg=BG3, fg=TEXT_DIM,
-                                  font=("Segoe UI", 9), anchor="e")
-        self.steam_lbl.pack(side="right", padx=12, fill="y")
+        tk.Label(sb, textvariable=self.status_var, bg="#16191e", fg=ST_DIM,
+                 font=("Segoe UI", 9), anchor="w").pack(side="left", padx=12)
+        steam = get_steam_path(self.cfg)
+        tk.Label(sb, text=f"Steam: {steam or 'not found'}", bg="#16191e",
+                 fg=ST_GREEN if steam else "#d9a441",
+                 font=("Segoe UI", 9)).pack(side="right", padx=12)
 
-    def _build_search_panel(self, parent):
-        card = tk.Frame(parent, bg=BG2, padx=14, pady=12)
+    def _section(self, parent, title):
+        card = tk.Frame(parent, bg=ST_BG2, padx=14, pady=12)
         card.pack(fill="x", pady=(0, 8))
-
-        tk.Label(card, text="SEARCH GAME", bg=BG2, fg=TEXT_DIM,
+        tk.Label(card, text=title, bg=ST_BG2, fg=ST_DIM,
                  font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        return card
 
-        row = tk.Frame(card, bg=BG2)
+    def _entry(self, parent):
+        e = tk.Entry(parent, bg="#14171c", fg=ST_TEXT, insertbackground=ST_TEXT,
+                     relief="flat", font=("Microsoft YaHei UI", 11), bd=0)
+        return e
+
+    def _btn(self, parent, text, cmd, accent=False):
+        b = tk.Button(parent, text=text, command=cmd, bd=0, cursor="hand2",
+                      bg=ST_ACCENT if accent else "#2f343c",
+                      fg="white" if accent else ST_TEXT,
+                      activebackground="#1688e0" if accent else "#3a4049",
+                      activeforeground="white",
+                      font=("Microsoft YaHei UI", 10, "bold" if accent else "normal"),
+                      padx=14, pady=6)
+        return b
+
+    def _build_search(self, parent):
+        card = self._section(parent, "SEARCH GAME")
+        row = tk.Frame(card, bg=ST_BG2)
         row.pack(fill="x", pady=(6, 0))
-
         self.search_var = tk.StringVar()
-        self.search_entry = tk.Entry(row, textvariable=self.search_var,
-                                     bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
-                                     relief="flat", font=("Segoe UI", 11),
-                                     bd=0)
+        self.search_entry = self._entry(row)
         self.search_entry.pack(side="left", fill="x", expand=True, ipady=7, padx=(0, 8))
-        self.search_entry.insert(0, "Game name or AppID...")
-        self.search_entry.bind("<FocusIn>",  self._clear_placeholder)
-        self.search_entry.bind("<FocusOut>", self._restore_placeholder)
-        self.search_entry.bind("<Return>",   lambda e: self._do_search())
+        self.search_entry.bind("<Return>", lambda e: self._do_search())
+        self._btn(row, "Search", self._do_search, accent=True).pack(side="left")
 
-        self.btn_search = ttk.Button(row, text="Search", style="Accent.TButton",
-                                     command=self._do_search)
-        self.btn_search.pack(side="left")
-
-        # Results table
-        tree_frame = tk.Frame(card, bg=BG2)
-        tree_frame.pack(fill="both", expand=True, pady=(10, 0))
-
-        cols = ("appid", "name")
-        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
-                                  height=7, selectmode="browse")
-        self.tree.heading("appid", text="AppID",  anchor="w")
-        self.tree.heading("name",  text="Name",   anchor="w")
-        self.tree.column("appid", width=100, minwidth=80, stretch=False)
-        self.tree.column("name",  width=300, minwidth=180, stretch=True)
-
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        tf = tk.Frame(card, bg=ST_BG2)
+        tf.pack(fill="both", expand=True, pady=(10, 0))
+        self.tree = ttk.Treeview(tf, columns=("appid", "name"), show="headings",
+                                 height=7, selectmode="browse", style="ST.Treeview")
+        self.tree.heading("appid", text="AppID", anchor="w")
+        self.tree.heading("name", text="Name", anchor="w")
+        self.tree.column("appid", width=90, stretch=False)
+        self.tree.column("name", width=280, stretch=True)
+        vsb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview,
+                            style="ST.Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
         self.tree.bind("<Double-1>", lambda e: self._unlock_selected())
 
-        # Unlock selected button
-        btn_row = tk.Frame(card, bg=BG2)
-        btn_row.pack(fill="x", pady=(8, 0))
-        self.btn_unlock_sel = ttk.Button(btn_row, text="⬇  Unlock Selected Game",
-                                          style="Accent.TButton",
-                                          command=self._unlock_selected)
-        self.btn_unlock_sel.pack(side="right")
-        tk.Label(btn_row, text="Double-click a row or select and click →",
-                 bg=BG2, fg=TEXT_DIM, font=("Segoe UI", 9)).pack(side="left")
+        br = tk.Frame(card, bg=ST_BG2)
+        br.pack(fill="x", pady=(8, 0))
+        self._btn(br, "⬇  Unlock Selected", self._unlock_selected,
+                  accent=True).pack(side="right")
+        tk.Label(br, text="Double-click a row, or select → Unlock", bg=ST_BG2,
+                 fg=ST_DIM, font=("Segoe UI", 9)).pack(side="left")
 
-    def _build_quick_panel(self, parent):
-        card = tk.Frame(parent, bg=BG2, padx=14, pady=12)
-        card.pack(fill="x", pady=(0, 8))
-
-        tk.Label(card, text="QUICK UNLOCK BY APPID", bg=BG2, fg=TEXT_DIM,
-                 font=("Segoe UI", 8, "bold")).pack(anchor="w")
-
-        row = tk.Frame(card, bg=BG2)
+    def _build_quick(self, parent):
+        card = self._section(parent, "QUICK UNLOCK BY APPID")
+        row = tk.Frame(card, bg=ST_BG2)
         row.pack(fill="x", pady=(6, 0))
-
         self.quick_var = tk.StringVar()
-        quick_entry = tk.Entry(row, textvariable=self.quick_var,
-                                bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
-                                relief="flat", font=("Segoe UI", 11), bd=0)
-        quick_entry.pack(side="left", fill="x", expand=True, ipady=7, padx=(0, 8))
-        quick_entry.bind("<Return>", lambda e: self._do_quick_unlock())
+        qe = self._entry(row)
+        qe.configure(textvariable=self.quick_var)
+        qe.pack(side="left", fill="x", expand=True, ipady=7, padx=(0, 8))
+        qe.bind("<Return>", lambda e: self._do_quick())
+        self._btn(row, "Unlock", self._do_quick).pack(side="left")
 
-        ttk.Button(row, text="Unlock", command=self._do_quick_unlock).pack(side="left")
-
-        # Bulk row
-        row2 = tk.Frame(card, bg=BG2)
+        row2 = tk.Frame(card, bg=ST_BG2)
         row2.pack(fill="x", pady=(8, 0))
-        tk.Label(row2, text="Bulk (one AppID per line):", bg=BG2, fg=TEXT_DIM,
+        tk.Label(row2, text="Bulk (one AppID per line):", bg=ST_BG2, fg=ST_DIM,
                  font=("Segoe UI", 9)).pack(side="left")
-        ttk.Button(row2, text="📂 Choose File...", command=self._do_bulk).pack(side="left", padx=8)
+        self._btn(row2, "📂 Choose File…", self._do_bulk).pack(side="left", padx=8)
 
-    def _build_tools_panel(self, parent):
-        card = tk.Frame(parent, bg=BG2, padx=14, pady=12)
-        card.pack(fill="x", pady=(0, 8))
+    def _build_tools(self, parent):
+        card = self._section(parent, "TOOLS")
+        row = tk.Frame(card, bg=ST_BG2)
+        row.pack(fill="x", pady=(4, 0))
+        self._btn(row, "🔑 Dump Keys", self.app.do_dump_keys).pack(side="left", padx=(0, 8))
+        self._btn(row, "🔄 Restart Steam", self.app.do_restart_steam).pack(side="left", padx=(0, 8))
+        self._btn(row, "⚙ Settings", self.app.open_settings).pack(side="left")
 
-        tk.Label(card, text="TOOLS", bg=BG2, fg=TEXT_DIM,
-                 font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 6))
-
-        row = tk.Frame(card, bg=BG2)
-        row.pack(fill="x")
-
-        ttk.Button(row, text="🔑 Dump Depot Keys",
-                   command=self._do_dump_keys).pack(side="left", padx=(0, 8))
-        ttk.Button(row, text="🔄 Restart Steam",
-                   command=self._do_restart_steam).pack(side="left", padx=(0, 8))
-
-    def _build_log_panel(self, parent):
-        tk.Label(parent, text="LOG", bg=BG2, fg=TEXT_DIM,
+    def _build_log(self, parent):
+        tk.Label(parent, text="LOG", bg=ST_BG2, fg=ST_DIM,
                  font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=10, pady=(10, 4))
+        self.log_text = tk.Text(parent, bg="#14171c", fg=ST_TEXT, insertbackground=ST_TEXT,
+                                relief="flat", font=("Consolas", 9), wrap="word",
+                                state="disabled", bd=0, padx=8, pady=6)
+        self.log_text.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.log_text.tag_config("ok", foreground=ST_GREEN)
+        self.log_text.tag_config("error", foreground="#f06363")
+        self.log_text.tag_config("warn", foreground="#e0b341")
+        self.log_text.tag_config("info", foreground=ST_ICON)
+        self.log_text.tag_config("dim", foreground=ST_DIM)
+        self.log_text.tag_config("header", foreground=ST_ACCENT, font=("Consolas", 9, "bold"))
 
-        self.log_text = tk.Text(
-            parent, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
-            relief="flat", font=("Consolas", 9), wrap="word",
-            state="disabled", bd=0, padx=8, pady=6,
-        )
-        self.log_text.pack(fill="both", expand=True, padx=8, pady=(0, 4))
-
-        # Tag colors
-        self.log_text.tag_config("ok",     foreground=GREEN)
-        self.log_text.tag_config("error",  foreground=RED)
-        self.log_text.tag_config("warn",   foreground=YELLOW)
-        self.log_text.tag_config("info",   foreground=ACCENT2)
-        self.log_text.tag_config("dim",    foreground=TEXT_DIM)
-        self.log_text.tag_config("header", foreground=ACCENT, font=("Consolas", 9, "bold"))
-
-        btn_clear = tk.Button(parent, text="Clear", bg=BG2, fg=TEXT_DIM,
-                              bd=0, font=("Segoe UI", 9), cursor="hand2",
-                              activebackground=BG2, activeforeground=TEXT,
-                              command=self._clear_log)
-        btn_clear.pack(anchor="e", padx=10, pady=(0, 8))
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
-    def _clear_placeholder(self, event):
-        if self.search_entry.get() == "Game name or AppID...":
-            self.search_entry.delete(0, "end")
-            self.search_entry.config(fg=TEXT)
-
-    def _restore_placeholder(self, event):
-        if not self.search_entry.get():
-            self.search_entry.insert(0, "Game name or AppID...")
-            self.search_entry.config(fg=TEXT_DIM)
-
-    def _check_steam(self):
-        steam = get_steam_path(self.cfg)
-        if steam:
-            self.steam_lbl.config(text=f"Steam: {steam}", fg=GREEN)
-            self.status_var.set("Steam found  |  Ready")
-        else:
-            self.steam_lbl.config(text="Steam: not found", fg=YELLOW)
-            self.status_var.set("Steam not found — set path in Settings")
-
-    def log(self, msg: str, tag: str = ""):
+    # logging that targets this workspace
+    def log(self, msg, tag=""):
         def _do():
+            if not (self.win and tk.Toplevel.winfo_exists(self.win)):
+                return
             self.log_text.config(state="normal")
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             self.log_text.insert("end", f"[{ts}] {msg}\n", tag or "")
             self.log_text.see("end")
             self.log_text.config(state="disabled")
-        self.root.after(0, _do)
+        self.app.root.after(0, _do)
 
-    def _clear_log(self):
-        self.log_text.config(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.config(state="disabled")
+    def set_status(self, msg):
+        self.app.root.after(0, lambda: self.status_var.set(msg)
+                            if self.win and tk.Toplevel.winfo_exists(self.win) else None)
 
-    def _set_status(self, msg: str):
-        self.root.after(0, lambda: self.status_var.set(msg))
+    # actions
+    def _do_search(self):
+        term = self.search_var.get().strip()
+        if not term:
+            return
+        self.log(f'Searching: "{term}"', "header")
 
-    def _set_busy(self, busy: bool):
-        self._busy = busy
-        state = "disabled" if busy else "normal"
-        self.root.after(0, lambda: (
-            self.btn_search.config(state=state),
-            self.btn_unlock_sel.config(state=state),
-        ))
+        def _done(results):
+            self._search_results = results
+            for r in self.tree.get_children():
+                self.tree.delete(r)
+            for g in results[:25]:
+                self.tree.insert("", "end", values=(g["appid"], g["name"]))
+            self.log(f"{len(results)} result(s)." if results else "No results.",
+                     "ok" if results else "warn")
 
-    def _run_async(self, coro, done_cb=None):
-        """Run a coroutine in a background thread with its own event loop."""
+        self.app.run_async(search_games(term), _done)
+
+    def _unlock_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Select a game", "Click a game in the list first.")
+            return
+        appid, name = self.tree.item(sel[0], "values")
+        self.log(f"Unlocking {name} ({appid})", "header")
+        self.app.start_unlock(str(appid), self)
+
+    def _do_quick(self):
+        appid = self.quick_var.get().strip()
+        if not appid.isdigit():
+            messagebox.showerror("Invalid", "AppID must be numbers only.")
+            return
+        self.log(f"Quick unlock: {appid}", "header")
+        self.app.start_unlock(appid, self)
+
+    def _do_bulk(self):
+        fp = filedialog.askopenfilename(title="Select AppID list",
+                                        filetypes=[("Text", "*.txt"), ("All", "*.*")])
+        if not fp:
+            return
+        ids = [l.strip() for l in Path(fp).read_text().splitlines() if l.strip().isdigit()]
+        if not ids:
+            messagebox.showerror("Empty", "No valid AppIDs found.")
+            return
+        self.log(f"Bulk: {len(ids)} AppIDs", "header")
+
+        async def _do():
+            ok = fail = 0
+            for a in ids:
+                if await unlock_app(a, self.cfg, self.log):
+                    ok += 1
+                else:
+                    fail += 1
+            return ok, fail
+
+        self.app.run_async(_do(), lambda r: self.log(
+            f"Bulk done: {r[0]} ok, {r[1]} failed", "info"))
+
+
+# ─── Floating icon application (main) ─────────────────────────────────────────
+
+class FloatingApp:
+    def __init__(self, root):
+        self.root = root
+        self.cfg = load_config()
+        self.menu = MenuController(self)
+        self.workspace = Workspace(self)
+        self._busy = False
+        self._drag = False
+
+        self._build_icon()
+        self.root.after(400, self._show_welcome)
+
+    # ── floating icon window ──────────────────────────────────────────────────
+    def _build_icon(self):
+        self.root.overrideredirect(True)
+        self.root.attributes("-topmost", True)
+
+        # Position on the PRIMARY monitor work area (multi-monitor safe).
+        # winfo_screenwidth() can return the full virtual desktop width across
+        # all monitors, which would put the icon off on another screen.
+        wa = self._primary_workarea()
+        self.ix = wa[2] - ICON_SIZE - 40
+        self.iy = wa[3] - ICON_SIZE - 60
+        self.root.geometry(f"{ICON_SIZE}x{ICON_SIZE}+{self.ix}+{self.iy}")
+
+        self.canvas = tk.Canvas(self.root, width=ICON_SIZE, height=ICON_SIZE,
+                                bg="#0d1622", highlightthickness=0, bd=0)
+        self.canvas.pack()
+        # Force the override-redirect window to actually map and come to front.
+        self.root.update_idletasks()
+        self.root.deiconify()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+        self.root.after(200, self._hide_from_taskbar)
+        self._draw_icon()
+
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_motion)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<Double-Button-1>", self._on_double)
+        self.canvas.bind("<Button-3>", self._on_right)
+        self.canvas.bind("<Enter>", lambda e: self._draw_icon(hover=True))
+        self.canvas.bind("<Leave>", lambda e: self._draw_icon(hover=False))
+
+    def _primary_workarea(self):
+        """Return (left, top, right, bottom) of the primary monitor work area."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            rect = wintypes.RECT()
+            # SPI_GETWORKAREA = 0x0030 -> primary monitor, minus taskbar
+            ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0)
+            if rect.right > rect.left and rect.bottom > rect.top:
+                return (rect.left, rect.top, rect.right, rect.bottom)
+        except Exception:
+            pass
+        return (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+
+    def _hide_from_taskbar(self):
+        """Make the floating icon a tool window so it has no taskbar button."""
+        try:
+            import ctypes
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_APPWINDOW  = 0x00040000
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            style = (style & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+            # SWP_NOMOVE|NOSIZE|NOZORDER|FRAMECHANGED to apply the new ex-style
+            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0020)
+        except Exception:
+            pass
+
+    def _draw_icon(self, hover=False):
+        c = self.canvas
+        c.delete("all")
+        s = ICON_SIZE
+        cx, cy = s / 2, s / 2
+        # outer disc (Steam dark blue gradient feel)
+        ring = ST_ACCENT if hover else "#316a96"
+        c.create_oval(2, 2, s - 2, s - 2, fill="#16202d", outline=ring, width=3)
+        c.create_oval(7, 7, s - 7, s - 7, outline="#1f3346", width=1)
+        # Steam emblem: large ring (head) + inner dot + pipe to small node
+        emblem = "#dfe7ee"
+        r1 = s * 0.20
+        # big ring upper-left of center
+        bx, by = cx - s * 0.06, cy - s * 0.06
+        c.create_oval(bx - r1, by - r1, bx + r1, by + r1, outline=emblem, width=4)
+        c.create_oval(bx - r1 * 0.45, by - r1 * 0.45,
+                      bx + r1 * 0.45, by + r1 * 0.45, fill=emblem, outline=emblem)
+        # pipe to small node lower-right
+        nx, ny = cx + s * 0.18, cy + s * 0.18
+        c.create_line(bx + r1 * 0.4, by + r1 * 0.4, nx, ny, fill=emblem, width=4)
+        r2 = s * 0.10
+        c.create_oval(nx - r2, ny - r2, nx + r2, ny + r2, fill=emblem, outline=emblem)
+
+    # ── welcome bubble ────────────────────────────────────────────────────────
+    def _show_welcome(self):
+        try:
+            bub = tk.Toplevel(self.root)
+            bub.overrideredirect(True)
+            bub.attributes("-topmost", True)
+            bub.configure(bg=ST_SEP)
+            inner = tk.Frame(bub, bg="#2b2f36")
+            inner.pack(padx=1, pady=1)
+            tk.Label(inner,
+                     text="Welcome Back. Double-click to open SteamUnlock,\nright-click for the menu.",
+                     bg="#2b2f36", fg=ST_TEXT, font=("Microsoft YaHei UI", 9),
+                     justify="left", padx=12, pady=8).pack()
+            bub.update_idletasks()
+            w = bub.winfo_reqwidth()
+            h = bub.winfo_reqheight()
+            x = self.root.winfo_x() - w - 10
+            y = self.root.winfo_y() + (ICON_SIZE - h) // 2
+            if x < 0:
+                x = self.root.winfo_x() + ICON_SIZE + 10
+            bub.geometry(f"+{x}+{y}")
+            self.root.after(5000, lambda: bub.destroy() if bub.winfo_exists() else None)
+        except tk.TclError:
+            pass
+
+    # ── icon interaction ──────────────────────────────────────────────────────
+    def _on_press(self, e):
+        self._drag = False
+        self._sx, self._sy = e.x_root, e.y_root
+        self._ox, self._oy = self.root.winfo_x(), self.root.winfo_y()
+
+    def _on_motion(self, e):
+        dx = e.x_root - self._sx
+        dy = e.y_root - self._sy
+        if abs(dx) > 4 or abs(dy) > 4:
+            self._drag = True
+        self.root.geometry(f"+{self._ox + dx}+{self._oy + dy}")
+
+    def _on_release(self, e):
+        pass
+
+    def _on_double(self, e):
+        if not self._drag:
+            self.workspace.show()
+
+    def _on_right(self, e):
+        self.menu.show(self._menu_items(), e.x_root, e.y_root, open_left=True)
+
+    # ── menu definition ───────────────────────────────────────────────────────
+    def _menu_items(self):
+        return [
+            {"icon": "▶", "label": "Launch Steam", "action": self.do_launch_steam},
+            {"sep": True},
+            {"icon": "🔍", "label": "Search for Games",
+             "action": lambda: self.workspace.show("search")},
+            {"icon": "⬇", "label": "Unlock Game…",
+             "action": lambda: self.workspace.show("quick")},
+            {"icon": "📋", "label": "Bulk Unlock…", "action": self._menu_bulk},
+            {"icon": "🔓", "label": "Unlock Solution", "submenu": [
+                {"icon": "✔", "label": "Activate Unlock Mode",
+                 "toggle": {"get": lambda: get_st_toggle("ActivateUnlockMode"),
+                            "set": lambda v: set_st_toggle("ActivateUnlockMode", v)}},
+                {"icon": "🔒", "label": "Always Stay Unlocked",
+                 "toggle": {"get": lambda: get_st_toggle("AlwaysStayUnlocked"),
+                            "set": lambda v: set_st_toggle("AlwaysStayUnlocked", v)}},
+                {"icon": "🚀", "label": "Launch with Steam",
+                 "toggle": {"get": get_launch_with_steam, "set": set_launch_with_steam}},
+            ]},
+            {"sep": True},
+            {"icon": "🔑", "label": "Dump Depot Keys", "action": self.do_dump_keys},
+            {"icon": "📁", "label": "Open Steam Folder", "action": self.do_open_steam_folder},
+            {"icon": "🔄", "label": "Restart Steam", "action": self.do_restart_steam},
+            {"icon": "⚙", "label": "Settings", "action": self.open_settings},
+            {"sep": True},
+            {"icon": "◳", "label": "Open Main Window", "action": self.workspace.show},
+            {"icon": "⏻", "label": "Exit", "action": self.root.destroy},
+        ]
+
+    def _menu_bulk(self):
+        self.workspace.show()
+        self.root.after(150, self.workspace._do_bulk)
+
+    # ── shared async runner ───────────────────────────────────────────────────
+    def run_async(self, coro, done_cb=None):
         def _thread():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -628,215 +935,156 @@ class SteamUnlockApp:
                 if done_cb:
                     self.root.after(0, lambda: done_cb(result))
             except Exception as e:
-                self.log(f"Error: {e}", "error")
+                self.root.after(0, lambda: self._toast(f"Error: {e}"))
             finally:
                 loop.close()
-                self._set_busy(False)
-        self._set_busy(True)
+                self._busy = False
+        self._busy = True
         threading.Thread(target=_thread, daemon=True).start()
 
-    # ── Actions ───────────────────────────────────────────────────────────────
+    def start_unlock(self, appid, ws=None):
+        ws = ws or self.workspace
+        if not (ws.win and tk.Toplevel.winfo_exists(ws.win)):
+            ws.show()
+        log_cb = ws.log
+        ws.set_status(f"Unlocking {appid}…")
+        self.run_async(unlock_app(appid, self.cfg, log_cb),
+                       lambda ok: ws.set_status("Done" if ok else f"Failed: {appid}"))
 
-    def _do_search(self):
-        term = self.search_var.get().strip()
-        if not term or term == "Game name or AppID...":
-            return
-        self.log(f'Searching: "{term}"', "header")
+    # ── quick toast ───────────────────────────────────────────────────────────
+    def _toast(self, msg, ms=2500):
+        try:
+            t = tk.Toplevel(self.root)
+            t.overrideredirect(True)
+            t.attributes("-topmost", True)
+            t.configure(bg=ST_SEP)
+            tk.Label(t, text=msg, bg="#2b2f36", fg=ST_TEXT,
+                     font=("Microsoft YaHei UI", 9), padx=14, pady=8).pack(padx=1, pady=1)
+            t.update_idletasks()
+            w = t.winfo_reqwidth()
+            x = self.root.winfo_x() - w - 10
+            y = self.root.winfo_y()
+            if x < 0:
+                x = self.root.winfo_x() + ICON_SIZE + 10
+            t.geometry(f"+{x}+{y}")
+            self.root.after(ms, lambda: t.destroy() if t.winfo_exists() else None)
+        except tk.TclError:
+            pass
 
-        async def _search():
-            return await search_games(term)
-
-        def _done(results):
-            self._search_results = results
-            for row in self.tree.get_children():
-                self.tree.delete(row)
-            if results:
-                for g in results[:25]:
-                    self.tree.insert("", "end", values=(g["appid"], g["name"]))
-                self.log(f"{len(results)} result(s) found.", "ok")
-            else:
-                self.log("No results.", "warn")
-
-        self._run_async(_search(), _done)
-
-    def _unlock_selected(self):
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo("Select a game", "Click a game in the list first.")
-            return
-        vals   = self.tree.item(sel[0], "values")
-        app_id = vals[0]
-        name   = vals[1]
-        self.log(f"Starting unlock: {name} ({app_id})", "header")
-        self._start_unlock(app_id)
-
-    def _do_quick_unlock(self):
-        app_id = self.quick_var.get().strip()
-        if not app_id:
-            return
-        if not app_id.isdigit():
-            messagebox.showerror("Invalid", f'"{app_id}" is not a valid AppID (numbers only).')
-            return
-        self.log(f"Quick unlock: {app_id}", "header")
-        self._start_unlock(app_id)
-
-    def _start_unlock(self, app_id: str):
-        if self._busy:
-            messagebox.showinfo("Busy", "An unlock is already in progress.")
-            return
-        self._set_status(f"Unlocking {app_id}...")
-
-        async def _do():
-            return await unlock_app(app_id, self.cfg, self.log)
-
-        def _done(ok):
-            self._set_status("Done" if ok else f"Failed — {app_id} not found")
-
-        self._run_async(_do(), _done)
-
-    def _do_bulk(self):
-        fp = filedialog.askopenfilename(
-            title="Select AppID list file",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
-        )
-        if not fp:
-            return
-        ids = [l.strip() for l in Path(fp).read_text().splitlines() if l.strip().isdigit()]
-        if not ids:
-            messagebox.showerror("Empty", "No valid AppIDs found in file.")
-            return
-        self.log(f"Bulk unlock: {len(ids)} AppIDs from {Path(fp).name}", "header")
-
-        async def _do():
-            ok = fail = 0
-            for app_id in ids:
-                if await unlock_app(app_id, self.cfg, self.log):
-                    ok += 1
-                else:
-                    fail += 1
-            return ok, fail
-
-        def _done(result):
-            ok, fail = result
-            self.log(f"Bulk done: {ok} succeeded, {fail} failed.", "info")
-            self._set_status(f"Bulk done: {ok}/{ok+fail}")
-
-        self._run_async(_do(), _done)
-
-    def _do_dump_keys(self):
+    # ── menu actions ──────────────────────────────────────────────────────────
+    def do_launch_steam(self):
         steam = get_steam_path(self.cfg)
-        default = str(steam / "depotcache") if steam else ""
-        dc_path = filedialog.askdirectory(
-            title="Select depotcache folder",
-            initialdir=default or SCRIPT_DIR,
-        )
-        if not dc_path:
-            return
-        dc = Path(dc_path)
-        self.log(f"Dumping keys from: {dc}", "header")
+        exe = steam / "steam.exe" if steam else None
+        if exe and exe.exists():
+            subprocess.Popen([str(exe)])
+            self._toast("Launching Steam…")
+        else:
+            self._toast("Steam not found")
 
-        def _do():
-            keys = dump_keys_from_depotcache(dc, self.log)
-            if keys:
-                out = SCRIPT_DIR / "keys.txt"
-                with open(out, "w", encoding="utf-8") as f:
-                    for did, k in sorted(keys.items()):
-                        f.write(f'"{did}":"{k}"\n')
-                self.log(f"Saved {len(keys)} keys to {out}", "ok")
-            else:
-                self.log("No depot keys found.", "warn")
-            self._set_busy(False)
-
-        self._set_busy(True)
-        threading.Thread(target=_do, daemon=True).start()
-
-    def _do_restart_steam(self):
+    def do_restart_steam(self):
         steam = get_steam_path(self.cfg)
         if not steam:
-            messagebox.showerror("Not Found", "Steam path not found. Set it in Settings.")
+            self._toast("Steam not found")
             return
         if messagebox.askyesno("Restart Steam", "Close and restart Steam now?"):
-            self.log("Restarting Steam...", "info")
             subprocess.run(["taskkill", "/F", "/IM", "steam.exe"], capture_output=True)
             time.sleep(2)
             exe = steam / "steam.exe"
             if exe.exists():
                 subprocess.Popen([str(exe)])
-                self.log("Steam restarted.", "ok")
+                self._toast("Steam restarted")
+
+    def do_open_steam_folder(self):
+        steam = get_steam_path(self.cfg)
+        if steam:
+            subprocess.Popen(["explorer", str(steam)])
+        else:
+            self._toast("Steam not found")
+
+    def do_dump_keys(self):
+        steam = get_steam_path(self.cfg)
+        default = str(steam / "depotcache") if steam else ""
+        dc = filedialog.askdirectory(title="Select depotcache folder",
+                                     initialdir=default or str(SCRIPT_DIR))
+        if not dc:
+            return
+        self.workspace.show()
+        self.workspace.log(f"Dumping keys from {dc}", "header")
+
+        def _do():
+            keys = dump_keys_from_depotcache(Path(dc), self.workspace.log)
+            if keys:
+                out = SCRIPT_DIR / "keys.txt"
+                with open(out, "w", encoding="utf-8") as f:
+                    for did, k in sorted(keys.items()):
+                        f.write(f'"{did}":"{k}"\n')
+                self.workspace.log(f"Saved {len(keys)} keys to {out}", "ok")
             else:
-                self.log("Could not find steam.exe to relaunch.", "error")
+                self.workspace.log("No keys found.", "warn")
 
-    # ── Settings dialog ───────────────────────────────────────────────────────
+        threading.Thread(target=_do, daemon=True).start()
 
-    def _open_settings(self):
+    def open_settings(self):
         win = tk.Toplevel(self.root)
         win.title("Settings")
         win.geometry("520x320")
-        win.configure(bg=BG)
+        win.configure(bg=ST_BG)
         win.resizable(False, False)
+        win.attributes("-topmost", True)
         win.grab_set()
 
-        def lbl(parent, text):
-            tk.Label(parent, text=text, bg=BG, fg=TEXT_DIM,
+        def lbl(t):
+            tk.Label(pad, text=t, bg=ST_BG, fg=ST_DIM,
                      font=("Segoe UI", 9)).pack(anchor="w", pady=(10, 2))
 
-        def entry(parent, value=""):
-            e = tk.Entry(parent, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
+        def entry(v=""):
+            e = tk.Entry(pad, bg="#14171c", fg=ST_TEXT, insertbackground=ST_TEXT,
                          relief="flat", font=("Segoe UI", 10), bd=0)
             e.pack(fill="x", ipady=6)
-            e.insert(0, value)
+            e.insert(0, v)
             return e
 
-        pad = tk.Frame(win, bg=BG, padx=20, pady=16)
+        pad = tk.Frame(win, bg=ST_BG, padx=20, pady=16)
         pad.pack(fill="both", expand=True)
 
-        lbl(pad, "GitHub Personal Token (optional — gives 5000 req/hr instead of 60):")
-        token_e = entry(pad, self.cfg.get("github_token", ""))
-
-        lbl(pad, "Steam Install Path (leave blank to auto-detect from registry):")
-        steam_e = entry(pad, self.cfg.get("steam_path", ""))
-
-        lbl(pad, "Output Mode:")
+        lbl("GitHub Personal Token (optional — 5000 req/hr vs 60):")
+        token_e = entry(self.cfg.get("github_token", ""))
+        lbl("Steam Install Path (blank = auto-detect):")
+        steam_e = entry(self.cfg.get("steam_path", ""))
+        lbl("Output Mode:")
         mode_var = tk.StringVar(value=self.cfg.get("output_mode", "auto"))
-        mode_frame = tk.Frame(pad, bg=BG)
-        mode_frame.pack(anchor="w", pady=(4, 0))
-        tk.Radiobutton(mode_frame, text="Auto-install into Steam",
-                       variable=mode_var, value="auto",
-                       bg=BG, fg=TEXT, selectcolor=BG3, activebackground=BG,
-                       activeforeground=TEXT).pack(side="left")
-        tk.Radiobutton(mode_frame, text="Save to local folder",
-                       variable=mode_var, value="local",
-                       bg=BG, fg=TEXT, selectcolor=BG3, activebackground=BG,
-                       activeforeground=TEXT).pack(side="left", padx=20)
+        mf = tk.Frame(pad, bg=ST_BG)
+        mf.pack(anchor="w", pady=(4, 0))
+        for txt, val in [("Auto-install into Steam", "auto"), ("Save to local folder", "local")]:
+            tk.Radiobutton(mf, text=txt, variable=mode_var, value=val, bg=ST_BG,
+                           fg=ST_TEXT, selectcolor=ST_BG2, activebackground=ST_BG,
+                           activeforeground=ST_TEXT).pack(side="left", padx=(0, 18))
 
-        def _save():
+        def save():
             self.cfg["github_token"] = token_e.get().strip()
-            self.cfg["steam_path"]   = steam_e.get().strip()
-            self.cfg["output_mode"]  = mode_var.get()
+            self.cfg["steam_path"] = steam_e.get().strip()
+            self.cfg["output_mode"] = mode_var.get()
             save_config(self.cfg)
-            self._check_steam()
-            self.log("Settings saved.", "ok")
+            self._toast("Settings saved")
             win.destroy()
 
-        btn_row = tk.Frame(pad, bg=BG)
-        btn_row.pack(fill="x", pady=(16, 0))
-        ttk.Button(btn_row, text="Save", style="Accent.TButton", command=_save).pack(side="right")
-        ttk.Button(btn_row, text="Cancel", command=win.destroy).pack(side="right", padx=8)
+        br = tk.Frame(pad, bg=ST_BG)
+        br.pack(fill="x", pady=(16, 0))
+        tk.Button(br, text="Save", command=save, bd=0, cursor="hand2", bg=ST_ACCENT,
+                  fg="white", activebackground="#1688e0", activeforeground="white",
+                  font=("Segoe UI", 10, "bold"), padx=16, pady=6).pack(side="right")
+        tk.Button(br, text="Cancel", command=win.destroy, bd=0, cursor="hand2",
+                  bg="#2f343c", fg=ST_TEXT, font=("Segoe UI", 10),
+                  padx=14, pady=6).pack(side="right", padx=8)
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 def main():
-    if sys.platform == "win32":
-        import ctypes
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
-
     root = tk.Tk()
-    app  = SteamUnlockApp(root)
+    FloatingApp(root)
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,15 @@
+# Build artifacts
+SteamUnlock/build/
+SteamUnlock/dist/
+SteamUnlock/*.spec
+**/__pycache__/
+
+# Runtime / generated
+SteamUnlock/config.json
+SteamUnlock/keys.txt
+SteamUnlock/*.log
+SteamUnlock/[[]*[]]*/
+
+# OS
+Thumbs.db
+desktop.ini
