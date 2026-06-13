@@ -24,6 +24,15 @@ VERSION     = "1.0.0"
 SCRIPT_DIR  = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 CONFIG_FILE = SCRIPT_DIR / "config.json"
 
+# Bundled SteamTools assets (logo, menu icons). PyInstaller unpacks --add-data
+# into sys._MEIPASS at runtime; in dev they live next to the script.
+ASSET_BASE  = Path(getattr(sys, "_MEIPASS", str(SCRIPT_DIR))) / "assets"
+
+def asset_path(*parts) -> str:
+    return str(ASSET_BASE.joinpath(*parts))
+
+UI_FONT  = "Arial"   # SteamTools' UI font (from its Qt stylesheet)
+
 GITHUB_REPOS = [
     "SteamAutoCracks/ManifestHub",
     "ikun0014/ManifestHub",
@@ -89,14 +98,32 @@ ENTRY_BG  = "#0d1b2a"
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
+def load_env_token() -> str:
+    env_file = SCRIPT_DIR / ".env"
+    if env_file.exists():
+        try:
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    if k.strip().upper() == "GITHUB_TOKEN":
+                        return v.strip().strip('"').strip("'")
+        except Exception:
+            pass
+    return os.environ.get("GITHUB_TOKEN", "")
+
 def load_config() -> dict:
+    cfg = DEFAULT_CONFIG.copy()
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, encoding="utf-8") as f:
-                return {**DEFAULT_CONFIG, **json.load(f)}
+                cfg.update(json.load(f))
         except Exception:
             pass
-    return DEFAULT_CONFIG.copy()
+    env_tok = load_env_token()
+    if env_tok and not cfg.get("github_token"):
+        cfg["github_token"] = env_tok
+    return cfg
 
 def save_config(cfg: dict):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -217,6 +244,34 @@ async def download_raw(session, repo, sha, path) -> Optional[bytes]:
                 pass
     return None
 
+async def _discover_repos(session, app_id: str, log_cb) -> List[str]:
+    """
+    Search GitHub for repos that contain a branch named after this AppID.
+    This finds community-uploaded manifests even if the repo isn't in our
+    static GITHUB_REPOS list. Requires a token for the search API.
+    """
+    try:
+        # GitHub code search: find files like "{appid}_*.manifest" in any repo
+        query = f"{app_id}+in:path+extension:manifest"
+        async with session.get(
+            f"{GITHUB_API}/search/code?q={query}&per_page=10",
+            ssl=False, timeout=aiohttp.ClientTimeout(total=15)
+        ) as r:
+            if r.status != 200:
+                return []
+            data = await r.json()
+            found = set()
+            for item in data.get("items", []):
+                repo_full = item.get("repository", {}).get("full_name", "")
+                if repo_full and repo_full not in GITHUB_REPOS:
+                    found.add(repo_full)
+            if found:
+                log_cb(f"Dynamic search found {len(found)} extra repo(s): {', '.join(found)}", "dim")
+            return list(found)
+    except Exception:
+        return []
+
+
 async def fetch_manifests(app_id: str, token: str, log_cb) -> Tuple[List[dict], Dict[str, str]]:
     headers = {"Accept": "application/vnd.github+json"}
     if token:
@@ -239,31 +294,46 @@ async def fetch_manifests(app_id: str, token: str, log_cb) -> Tuple[List[dict], 
         except Exception:
             pass
 
-        for repo in GITHUB_REPOS:
-            log_cb(f"Checking {repo} ...", "dim")
+        async def check_repo(repo):
             try:
                 async with session.get(
                     f"{GITHUB_API}/repos/{repo}/branches/{app_id}",
                     ssl=False, timeout=aiohttp.ClientTimeout(total=15)
                 ) as r:
-                    if r.status == 404:
-                        continue
-                    if r.status != 200:
-                        continue
-                    branch = await r.json()
+                    if r.status == 200:
+                        branch = await r.json()
+                        date_str = branch.get("commit", {}).get("commit", {}).get("author", {}).get("date", "")
+                        return repo, branch, date_str
             except Exception:
-                continue
+                pass
+            return repo, None, ""
 
-            if "commit" not in branch:
-                continue
+        # Static repos first; then dynamically discover extras via GitHub search
+        repos_to_check = list(GITHUB_REPOS)
+        if token:  # search API needs auth to be reliable
+            extra = await _discover_repos(session, app_id, log_cb)
+            repos_to_check.extend(extra)
 
-            sha      = branch["commit"]["sha"]
+        log_cb(f"Checking {len(repos_to_check)} manifest source(s)...", "dim")
+        tasks = [check_repo(repo) for repo in repos_to_check]
+        results = await asyncio.gather(*tasks)
+
+        valid_results = [r for r in results if r[1] is not None]
+        if not valid_results:
+            return [], {}
+
+        # Sort by commit date descending (newest first)
+        valid_results.sort(key=lambda x: x[2], reverse=True)
+
+        for repo, branch, date_str in valid_results:
+            log_cb(f"Using repo: {repo} (newest version, updated {date_str[:10]})", "info")
+            sha = branch["commit"]["sha"]
             tree_url = branch["commit"]["commit"]["tree"]["url"]
-            date     = branch["commit"]["commit"]["author"]["date"]
-
             try:
                 async with session.get(tree_url, ssl=False, timeout=aiohttp.ClientTimeout(total=15)) as r2:
-                    tree = (await r2.json()).get("tree", []) if r2.status == 200 else []
+                    if r2.status != 200:
+                        continue
+                    tree = (await r2.json()).get("tree", [])
             except Exception:
                 continue
 
@@ -293,7 +363,6 @@ async def fetch_manifests(app_id: str, token: str, log_cb) -> Tuple[List[dict], 
                         })
 
             if manifests:
-                log_cb(f"Found in {repo} — {len(manifests)} manifest(s), updated {date[:10]}", "ok")
                 return manifests, depot_keys
 
     return [], {}
@@ -471,77 +540,168 @@ ST_OFF      = "#555555"
 ST_ACCENT   = "#2a82da"   # blue accent (links / headings)
 KEY_COLOR   = "#ff00ff"   # transparency key for the floating icon
 
-ICON_SIZE   = 78          # floating icon diameter (px)
+ICON_SIZE   = 40          # floating icon diameter (px)
 
 
 # ─── Custom dark fly-out menu (SteamTools style) ──────────────────────────────
 
+class CustomMenu(tk.Toplevel):
+    def __init__(self, parent, items, x, y, controller):
+        super().__init__(parent)
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(bg=ST_SEP)
+        
+        self.items = items
+        self.controller = controller
+        
+        # Outer border frame
+        inner = tk.Frame(self, bg=ST_MENU_BG, padx=4, pady=4)
+        inner.pack(padx=1, pady=1)
+        
+        # Build menu items
+        self._build_menu(inner)
+        
+        # Position menu to not go off-screen
+        self.update_idletasks()
+        w = self.winfo_reqwidth()
+        h = self.winfo_reqheight()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        
+        # Position menu to the left of the click x
+        menu_x = x - w
+        if menu_x < 0:
+            menu_x = x + 10
+        if menu_x + w > sw:
+            menu_x = sw - w - 10
+            
+        menu_y = y - h // 2
+        if menu_y < 0:
+            menu_y = 10
+        if menu_y + h > sh:
+            menu_y = sh - h - 10
+            
+        self.geometry(f"+{int(menu_x)}+{int(menu_y)}")
+        
+        # Events to close
+        self.bind("<FocusOut>", lambda e: self.destroy())
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.focus_force()
+        self.grab_set()
+        
+        self.bind("<Button-1>", self._check_click_outside)
+
+    def _check_click_outside(self, event):
+        x, y = event.x, event.y
+        if x < 0 or y < 0 or x > self.winfo_width() or y > self.winfo_height():
+            self.destroy()
+
+    def _build_menu(self, parent):
+        for item in self.items:
+            if item.get("sep"):
+                sep = tk.Frame(parent, bg=ST_SEP, height=1)
+                sep.pack(fill="x", pady=4, padx=6)
+                continue
+                
+            if "submenu" in item:
+                # Submenu Header Row
+                lbl_frame = tk.Frame(parent, bg=ST_MENU_BG, height=26)
+                lbl_frame.pack(fill="x", pady=(2, 0))
+                
+                img = self.controller._icon(item.get("img"))
+                icon_lbl = tk.Label(lbl_frame, image=img, bg=ST_MENU_BG) if img else tk.Label(lbl_frame, text="", bg=ST_MENU_BG)
+                icon_lbl.pack(side="left", padx=(6, 8))
+                
+                txt_lbl = tk.Label(lbl_frame, text=item["label"].upper(), fg=ST_DIM, bg=ST_MENU_BG, font=(UI_FONT, 8, "bold"))
+                txt_lbl.pack(side="left")
+                
+                for sub_item in item["submenu"]:
+                    self._create_row(parent, sub_item, indent=14)
+            else:
+                self._create_row(parent, item)
+
+    def _create_row(self, parent, item, indent=0):
+        row = tk.Frame(parent, bg=ST_MENU_BG, cursor="hand2")
+        row.pack(fill="x", ipady=3)
+        
+        # Icon
+        img = self.controller._icon(item.get("img"))
+        icon_lbl = tk.Label(row, image=img, bg=ST_MENU_BG) if img else tk.Label(row, text="", bg=ST_MENU_BG)
+        icon_lbl.pack(side="left", padx=(6 + indent, 8))
+        
+        # Text
+        txt_lbl = tk.Label(row, text=item["label"], fg=ST_TEXT, bg=ST_MENU_BG, font=(UI_FONT, 10))
+        txt_lbl.pack(side="left", padx=(0, 24))
+        
+        # Toggle status or check
+        indicator_lbl = None
+        if "toggle" in item:
+            is_on = item["toggle"]["get"]()
+            indicator_text = "●" if is_on else "○"
+            indicator_color = ST_GREEN if is_on else ST_OFF
+            indicator_lbl = tk.Label(row, text=indicator_text, fg=indicator_color, bg=ST_MENU_BG, font=(UI_FONT, 10), width=3)
+            indicator_lbl.pack(side="right", padx=6)
+
+        def on_enter(e, r=row):
+            r.configure(bg=ST_HOVER)
+            for child in r.winfo_children():
+                child.configure(bg=ST_HOVER)
+                
+        def on_leave(e, r=row):
+            r.configure(bg=ST_MENU_BG)
+            for child in r.winfo_children():
+                child.configure(bg=ST_MENU_BG)
+
+        row.bind("<Enter>", on_enter)
+        row.bind("<Leave>", on_leave)
+        
+        def on_click(e, it=item):
+            self.destroy()
+            if "toggle" in it:
+                current = it["toggle"]["get"]()
+                it["toggle"]["set"](not current)
+            elif "action" in it:
+                it["action"]()
+                
+        row.bind("<ButtonRelease-1>", on_click)
+        for child in row.winfo_children():
+            child.bind("<Enter>", on_enter)
+            child.bind("<Leave>", on_leave)
+            child.bind("<ButtonRelease-1>", on_click)
+
+
 class MenuController:
-    """SteamTools-style right-click menu built on the native tk.Menu (robust:
-    handles hover, submenus, click-away and on-screen positioning automatically),
-    themed dark with emoji icons and green check toggles."""
+    """SteamTools-style right-click dropdown menu built on CustomMenu."""
 
     def __init__(self, app):
         self.app = app
         self.root = app.root
         self._menu = None
-        self._toggle_vars = {}
+        self._imgs = {}      # name -> PhotoImage (kept alive)
 
-    def _new_menu(self):
-        return tk.Menu(
-            self.root, tearoff=0,
-            bg=ST_MENU_BG, fg=ST_TEXT,
-            activebackground=ST_HOVER, activeforeground="white",
-            disabledforeground=ST_DIM,
-            bd=0, relief="flat", activeborderwidth=0,
-            font=("Microsoft YaHei UI", 10),
-        )
-
-    def _build(self, items):
-        m = self._new_menu()
-        for item in items:
-            if item.get("sep"):
-                m.add_separator()
-                continue
-            icon = item.get("icon", "")
-            label = f"  {icon}  {item['label']}" if icon else f"  {item['label']}"
-            if "submenu" in item:
-                sub = self._build(item["submenu"])
-                m.add_cascade(label=label + "    ", menu=sub)
-            elif "toggle" in item:
-                var = tk.BooleanVar(value=item["toggle"]["get"]())
-                self._toggle_vars[item["label"]] = var
-
-                def _cb(it=item, v=var):
-                    it["toggle"]["set"](v.get())
-
-                m.add_checkbutton(
-                    label=label, variable=var, command=_cb,
-                    onvalue=True, offvalue=False, selectcolor=ST_GREEN,
-                )
-            else:
-                state = "normal" if item.get("enabled", True) else "disabled"
-                m.add_command(label=label, state=state,
-                              command=item.get("action") or (lambda: None))
-        return m
+    def _icon(self, name):
+        """Load a bundled SteamTools menu icon (PNG) once, cached."""
+        if not name:
+            return None
+        if name in self._imgs:
+            return self._imgs[name]
+        try:
+            img = tk.PhotoImage(file=asset_path("icons", f"{name}.png"))
+        except Exception:
+            img = None
+        self._imgs[name] = img
+        return img
 
     def show(self, items, x, y, open_left=True):
         self.close()
-        self._toggle_vars = {}
-        self._menu = self._build(items)
-        # tk_popup auto-adjusts to stay on-screen and opens leftward near the
-        # right edge, which matches the floating icon sitting bottom-right.
-        try:
-            self._menu.tk_popup(int(x), int(y))
-        finally:
-            self._menu.grab_release()
+        self._menu = CustomMenu(self.root, items, x, y, self)
 
     def close(self):
         if self._menu is not None:
             try:
-                self._menu.unpost()
                 self._menu.destroy()
-            except tk.TclError:
+            except Exception:
                 pass
             self._menu = None
 
@@ -588,9 +748,9 @@ class Workspace:
             pass
         style.configure("ST.Treeview", background=ST_BG2, foreground=ST_TEXT,
                         fieldbackground=ST_BG2, rowheight=28,
-                        font=("Microsoft YaHei UI", 10), borderwidth=0)
+                        font=(UI_FONT, 10), borderwidth=0)
         style.configure("ST.Treeview.Heading", background=ST_HEADER, foreground=ST_DIM,
-                        font=("Microsoft YaHei UI", 9, "bold"), borderwidth=0)
+                        font=(UI_FONT, 9, "bold"), borderwidth=0)
         style.map("ST.Treeview", background=[("selected", ST_HOVER)],
                   foreground=[("selected", "white")])
         style.configure("ST.Vertical.TScrollbar", background=ST_BG2,
@@ -607,14 +767,14 @@ class Workspace:
         self._draw_mini_logo(logo, 26)
 
         tk.Label(header, text="SteamUnlock", bg=ST_HEADER, fg=ST_TEXT,
-                 font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
+                 font=(UI_FONT, 12, "bold")).pack(side="left")
         tk.Label(header, text=f"v{VERSION}", bg=ST_HEADER, fg=ST_DIM,
-                 font=("Segoe UI", 9)).pack(side="left", padx=6)
+                 font=(UI_FONT, 9)).pack(side="left", padx=6)
 
         # window control buttons (right)
         def ctl(txt, cmd, hover_bg):
             b = tk.Label(header, text=txt, bg=ST_HEADER, fg=ST_DIM,
-                         font=("Segoe UI", 12), width=4, cursor="hand2")
+                         font=(UI_FONT, 12), width=4, cursor="hand2")
             b.pack(side="right", fill="y")
             b.bind("<Button-1>", lambda e: cmd())
             b.bind("<Enter>", lambda e: b.configure(bg=hover_bg, fg="white"))
@@ -647,11 +807,11 @@ class Workspace:
         sb.pack_propagate(False)
         self.status_var = tk.StringVar(value="Ready")
         tk.Label(sb, textvariable=self.status_var, bg=ST_HEADER, fg=ST_DIM,
-                 font=("Segoe UI", 9), anchor="w").pack(side="left", padx=12)
+                 font=(UI_FONT, 9), anchor="w").pack(side="left", padx=12)
         steam = get_steam_path(self.cfg)
         tk.Label(sb, text=f"Steam: {steam or 'not found'}", bg=ST_HEADER,
                  fg=ST_GREEN if steam else "#d9a441",
-                 font=("Segoe UI", 9)).pack(side="right", padx=12)
+                 font=(UI_FONT, 9)).pack(side="right", padx=12)
 
         self.win.update_idletasks()
         self.win.lift()
@@ -668,6 +828,14 @@ class Workspace:
         self.win.geometry(f"+{nx}+{ny}")
 
     def _draw_mini_logo(self, c, s):
+        # Real SteamTools logo in the title bar (falls back to a drawn emblem).
+        try:
+            self._tb_logo = tk.PhotoImage(file=asset_path("logo_26.png"))
+            c.configure(bg=ST_HEADER)
+            c.create_image(s // 2, s // 2, image=self._tb_logo)
+            return
+        except Exception:
+            pass
         cx = cy = s / 2
         emblem = "#e6e6e6"
         c.create_oval(1, 1, s - 1, s - 1, fill="#1d1d1d", outline="#4a4a4a", width=2)
@@ -685,12 +853,12 @@ class Workspace:
         card = tk.Frame(parent, bg=ST_BG2, padx=14, pady=12)
         card.pack(fill="x", pady=(0, 8))
         tk.Label(card, text=title, bg=ST_BG2, fg=ST_DIM,
-                 font=("Segoe UI", 8, "bold")).pack(anchor="w")
+                 font=(UI_FONT, 8, "bold")).pack(anchor="w")
         return card
 
     def _entry(self, parent):
         e = tk.Entry(parent, bg=ST_BG2, fg=ST_TEXT, insertbackground=ST_TEXT,
-                     relief="flat", font=("Microsoft YaHei UI", 11), bd=0)
+                     relief="flat", font=(UI_FONT, 11), bd=0)
         return e
 
     def _btn(self, parent, text, cmd, accent=False):
@@ -702,7 +870,7 @@ class Workspace:
             bg, fg, hov, hfg = ST_BG2, ST_CREAM, ST_HOVER, "white"
         b = tk.Button(parent, text=text, command=cmd, bd=0, cursor="hand2",
                       bg=bg, fg=fg, activebackground=hov, activeforeground=hfg,
-                      font=("Microsoft YaHei UI", 10, "bold" if accent else "normal"),
+                      font=(UI_FONT, 10, "bold" if accent else "normal"),
                       padx=16, pady=7)
         b.bind("<Enter>", lambda e: b.configure(bg=hov, fg=hfg))
         b.bind("<Leave>", lambda e: b.configure(bg=bg, fg=fg))
@@ -720,7 +888,7 @@ class Workspace:
         self._btn(row, "Search", self._do_search, accent=True).pack(side="left")
         # hint
         tk.Label(card, text="Type a game name, or paste an AppID / store URL",
-                 bg=ST_BG2, fg=ST_DIM, font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
+                 bg=ST_BG2, fg=ST_DIM, font=(UI_FONT, 8)).pack(anchor="w", pady=(4, 0))
 
         tf = tk.Frame(card, bg=ST_BG2)
         tf.pack(fill="both", expand=True, pady=(10, 0))
@@ -742,7 +910,7 @@ class Workspace:
         self._btn(br, "⬇  Unlock Selected", self._unlock_selected,
                   accent=True).pack(side="right")
         tk.Label(br, text="Double-click a row, or select → Unlock", bg=ST_BG2,
-                 fg=ST_DIM, font=("Segoe UI", 9)).pack(side="left")
+                 fg=ST_DIM, font=(UI_FONT, 9)).pack(side="left")
 
     def _build_quick(self, parent):
         card = self._section(parent, "QUICK UNLOCK BY APPID / URL")
@@ -758,7 +926,7 @@ class Workspace:
         row2 = tk.Frame(card, bg=ST_BG2)
         row2.pack(fill="x", pady=(8, 0))
         tk.Label(row2, text="Bulk (one AppID per line):", bg=ST_BG2, fg=ST_DIM,
-                 font=("Segoe UI", 9)).pack(side="left")
+                 font=(UI_FONT, 9)).pack(side="left")
         self._btn(row2, "📂 Choose File…", self._do_bulk).pack(side="left", padx=8)
 
     def _build_tools(self, parent):
@@ -771,7 +939,7 @@ class Workspace:
 
     def _build_log(self, parent):
         tk.Label(parent, text="LOG", bg=ST_BG2, fg=ST_DIM,
-                 font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=10, pady=(10, 4))
+                 font=(UI_FONT, 8, "bold")).pack(anchor="w", padx=10, pady=(10, 4))
         self.log_text = tk.Text(parent, bg="#262626", fg=ST_TEXT, insertbackground=ST_TEXT,
                                 relief="flat", font=("Consolas", 9), wrap="word",
                                 state="disabled", bd=0, padx=8, pady=6)
@@ -909,14 +1077,20 @@ class FloatingApp:
         self.root.geometry(f"{ICON_SIZE}x{ICON_SIZE}+{self.ix}+{self.iy}")
 
         self.canvas = tk.Canvas(self.root, width=ICON_SIZE, height=ICON_SIZE,
-                                bg="#1d1d1d", highlightthickness=0, bd=0)
+                                bg="#f3f3f3", highlightthickness=0, bd=0)
         self.canvas.pack()
+        # Load the real SteamTools logo (falls back to a drawn emblem).
+        try:
+            self._logo_img = tk.PhotoImage(file=asset_path("logo_52.png"))
+        except Exception:
+            self._logo_img = None
         # Force the override-redirect window to actually map and come to front.
         self.root.update_idletasks()
         self.root.deiconify()
         self.root.lift()
         self.root.attributes("-topmost", True)
         self.root.after(200, self._hide_from_taskbar)
+        self.root.after(60, self._clip_circle)
         self._draw_icon()
 
         self.canvas.bind("<ButtonPress-1>", self._on_press)
@@ -957,25 +1131,36 @@ class FloatingApp:
         except Exception:
             pass
 
+    def _clip_circle(self):
+        """Clip the floating window to a perfect circle (no square corners)."""
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+            rgn = ctypes.windll.gdi32.CreateEllipticRgn(0, 0, ICON_SIZE + 1, ICON_SIZE + 1)
+            ctypes.windll.user32.SetWindowRgn(hwnd, rgn, True)
+        except Exception:
+            pass
+
     def _draw_icon(self, hover=False):
         c = self.canvas
         c.delete("all")
         s = ICON_SIZE
+        if self._logo_img is not None:
+            c.create_image(s // 2, s // 2, image=self._logo_img)
+            # signature green ring on hover
+            if hover:
+                c.create_oval(2, 2, s - 2, s - 2, outline=ST_GREEN, width=3)
+            return
+        # fallback emblem (if the logo asset is missing)
         cx, cy = s / 2, s / 2
-        # outer disc — neutral dark badge matching the SteamTools theme,
-        # signature green ring on hover.
         ring = ST_GREEN if hover else "#4a4a4a"
         c.create_oval(2, 2, s - 2, s - 2, fill="#1d1d1d", outline=ring, width=3)
-        c.create_oval(7, 7, s - 7, s - 7, outline="#2c2c2c", width=1)
-        # Steam emblem: large ring (head) + inner dot + pipe to small node
         emblem = "#e6e6e6"
         r1 = s * 0.20
-        # big ring upper-left of center
         bx, by = cx - s * 0.06, cy - s * 0.06
         c.create_oval(bx - r1, by - r1, bx + r1, by + r1, outline=emblem, width=4)
         c.create_oval(bx - r1 * 0.45, by - r1 * 0.45,
                       bx + r1 * 0.45, by + r1 * 0.45, fill=emblem, outline=emblem)
-        # pipe to small node lower-right
         nx, ny = cx + s * 0.18, cy + s * 0.18
         c.create_line(bx + r1 * 0.4, by + r1 * 0.4, nx, ny, fill=emblem, width=4)
         r2 = s * 0.10
@@ -992,7 +1177,7 @@ class FloatingApp:
             inner.pack(padx=1, pady=1)
             tk.Label(inner,
                      text="Welcome Back. Double-click to open SteamUnlock,\nright-click for the menu.",
-                     bg="#3a3a3a", fg=ST_TEXT, font=("Microsoft YaHei UI", 9),
+                     bg="#3a3a3a", fg=ST_TEXT, font=(UI_FONT, 9),
                      justify="left", padx=12, pady=8).pack()
             bub.update_idletasks()
             w = bub.winfo_reqwidth()
@@ -1032,31 +1217,31 @@ class FloatingApp:
     # ── menu definition ───────────────────────────────────────────────────────
     def _menu_items(self):
         return [
-            {"icon": "▶", "label": "Launch Steam", "action": self.do_launch_steam},
+            {"img": "launch", "label": "Launch Steam", "action": self.do_launch_steam},
             {"sep": True},
-            {"icon": "🔍", "label": "Search for Games",
+            {"img": "search", "label": "Search for Games",
              "action": lambda: self.workspace.show("search")},
-            {"icon": "⬇", "label": "Unlock Game…",
+            {"img": "unlock", "label": "Unlock Game…",
              "action": lambda: self.workspace.show("quick")},
-            {"icon": "📋", "label": "Bulk Unlock…", "action": self._menu_bulk},
-            {"icon": "🔓", "label": "Unlock Solution", "submenu": [
-                {"icon": "✔", "label": "Activate Unlock Mode",
+            {"img": "bulk", "label": "Bulk Unlock…", "action": self._menu_bulk},
+            {"img": "solution", "label": "Unlock Solution", "submenu": [
+                {"label": "Activate Unlock Mode",
                  "toggle": {"get": lambda: get_st_toggle("ActivateUnlockMode"),
                             "set": lambda v: set_st_toggle("ActivateUnlockMode", v)}},
-                {"icon": "🔒", "label": "Always Stay Unlocked",
+                {"label": "Always Stay Unlocked",
                  "toggle": {"get": lambda: get_st_toggle("AlwaysStayUnlocked"),
                             "set": lambda v: set_st_toggle("AlwaysStayUnlocked", v)}},
-                {"icon": "🚀", "label": "Launch with Steam",
+                {"label": "Launch with Steam",
                  "toggle": {"get": get_launch_with_steam, "set": set_launch_with_steam}},
             ]},
             {"sep": True},
-            {"icon": "🔑", "label": "Dump Depot Keys", "action": self.do_dump_keys},
-            {"icon": "📁", "label": "Open Steam Folder", "action": self.do_open_steam_folder},
-            {"icon": "🔄", "label": "Restart Steam", "action": self.do_restart_steam},
-            {"icon": "⚙", "label": "Settings", "action": self.open_settings},
+            {"img": "keys", "label": "Dump Depot Keys", "action": self.do_dump_keys},
+            {"img": "folder", "label": "Open Steam Folder", "action": self.do_open_steam_folder},
+            {"img": "restart", "label": "Restart Steam", "action": self.do_restart_steam},
+            {"img": "settings", "label": "Settings", "action": self.open_settings},
             {"sep": True},
-            {"icon": "◳", "label": "Open Main Window", "action": self.workspace.show},
-            {"icon": "⏻", "label": "Exit", "action": self.root.destroy},
+            {"img": "mainwindow", "label": "Open Main Window", "action": self.workspace.show},
+            {"img": "exit", "label": "Exit", "action": self.root.destroy},
         ]
 
     def _menu_bulk(self):
@@ -1097,7 +1282,7 @@ class FloatingApp:
             t.attributes("-topmost", True)
             t.configure(bg=ST_SEP)
             tk.Label(t, text=msg, bg="#3a3a3a", fg=ST_TEXT,
-                     font=("Microsoft YaHei UI", 9), padx=14, pady=8).pack(padx=1, pady=1)
+                     font=(UI_FONT, 9), padx=14, pady=8).pack(padx=1, pady=1)
             t.update_idletasks()
             w = t.winfo_reqwidth()
             x = self.root.winfo_x() - w - 10
@@ -1174,11 +1359,11 @@ class FloatingApp:
 
         def lbl(t):
             tk.Label(pad, text=t, bg=ST_BG, fg=ST_DIM,
-                     font=("Segoe UI", 9)).pack(anchor="w", pady=(10, 2))
+                     font=(UI_FONT, 9)).pack(anchor="w", pady=(10, 2))
 
         def entry(v=""):
             e = tk.Entry(pad, bg=ST_BG2, fg=ST_TEXT, insertbackground=ST_TEXT,
-                         relief="flat", font=("Segoe UI", 10), bd=0)
+                         relief="flat", font=(UI_FONT, 10), bd=0)
             e.pack(fill="x", ipady=6)
             e.insert(0, v)
             return e
@@ -1186,8 +1371,19 @@ class FloatingApp:
         pad = tk.Frame(win, bg=ST_BG, padx=20, pady=16)
         pad.pack(fill="both", expand=True)
 
-        lbl("GitHub Personal Token (optional — 5000 req/hr vs 60):")
+        lbl("GitHub Personal Token (optional — 5000 req/hr vs 60 without):")
         token_e = entry(self.cfg.get("github_token", ""))
+        # show where the token currently comes from
+        env_path = SCRIPT_DIR / ".env"
+        env_note = "Loaded from .env" if (env_path.exists() and load_env_token()) else "Not set"
+        tk.Label(pad, text=f"Tip: also readable from .env next to the exe. Currently: {env_note}",
+                 bg=ST_BG, fg=ST_DIM, font=(UI_FONT, 8)).pack(anchor="w")
+        save_env_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(pad, text="Save token to .env file (keeps it out of config.json)",
+                       variable=save_env_var, bg=ST_BG, fg=ST_TEXT, selectcolor=ST_BG2,
+                       activebackground=ST_BG, activeforeground=ST_TEXT,
+                       font=(UI_FONT, 9)).pack(anchor="w", pady=(2, 4))
+
         lbl("Steam Install Path (blank = auto-detect):")
         steam_e = entry(self.cfg.get("steam_path", ""))
         lbl("Output Mode:")
@@ -1200,10 +1396,18 @@ class FloatingApp:
                            activeforeground=ST_TEXT).pack(side="left", padx=(0, 18))
 
         def save():
-            self.cfg["github_token"] = token_e.get().strip()
+            tok = token_e.get().strip()
+            if save_env_var.get() and tok:
+                # Write token to .env so it's not baked into config.json
+                env_path.write_text(f"GITHUB_TOKEN={tok}\n", encoding="utf-8")
+                self.cfg["github_token"] = ""   # don't duplicate it in config too
+            else:
+                self.cfg["github_token"] = tok
             self.cfg["steam_path"] = steam_e.get().strip()
             self.cfg["output_mode"] = mode_var.get()
             save_config(self.cfg)
+            # Reload effective token
+            self.cfg["github_token"] = tok or load_env_token()
             self._toast("Settings saved")
             win.destroy()
 
@@ -1211,10 +1415,10 @@ class FloatingApp:
         br.pack(fill="x", pady=(16, 0))
         tk.Button(br, text="Save", command=save, bd=0, cursor="hand2", bg=ST_GREEN,
                   fg="#10231b", activebackground="#46e6b0", activeforeground="#10231b",
-                  font=("Segoe UI", 10, "bold"), padx=18, pady=7).pack(side="right")
+                  font=(UI_FONT, 10, "bold"), padx=18, pady=7).pack(side="right")
         tk.Button(br, text="Cancel", command=win.destroy, bd=0, cursor="hand2",
                   bg=ST_BG2, fg=ST_CREAM, activebackground=ST_HOVER, activeforeground="white",
-                  font=("Segoe UI", 10), padx=16, pady=7).pack(side="right", padx=8)
+                  font=(UI_FONT, 10), padx=16, pady=7).pack(side="right", padx=8)
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────

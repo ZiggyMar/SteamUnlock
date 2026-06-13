@@ -71,14 +71,32 @@ log = logging.getLogger(__name__)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
+def load_env_token() -> str:
+    env_file = SCRIPT_DIR / ".env"
+    if env_file.exists():
+        try:
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    if k.strip().upper() == "GITHUB_TOKEN":
+                        return v.strip().strip('"').strip("'")
+        except Exception:
+            pass
+    return os.environ.get("GITHUB_TOKEN", "")
+
 def load_config() -> dict:
+    cfg = DEFAULT_CONFIG.copy()
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, encoding="utf-8") as f:
-                return {**DEFAULT_CONFIG, **json.load(f)}
+                cfg.update(json.load(f))
         except Exception:
             pass
-    return DEFAULT_CONFIG.copy()
+    env_tok = load_env_token()
+    if env_tok and not cfg.get("github_token"):
+        cfg["github_token"] = env_tok
+    return cfg
 
 def save_config(cfg: dict):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -255,10 +273,8 @@ async def fetch_manifests(
     app_id: str, github_token: str = ""
 ) -> Tuple[List[dict], Dict[str, str]]:
     """
-    Search all GitHub repos for this AppID branch.
-    Returns (manifest_list, depot_keys).
-      manifest_list: [{"depot_id", "manifest_id", "sha", "repo", "path"}, ...]
-      depot_keys:    {depot_id: decryption_key_hex}
+    Search all GitHub repos concurrently for this AppID branch.
+    Returns (manifest_list, depot_keys) from the repository branch with the latest commit date.
     """
     gh_headers = {"Accept": "application/vnd.github+json"}
     if github_token:
@@ -270,29 +286,62 @@ async def fetch_manifests(
         if rl and rl.get("remaining", 1) == 0:
             return [], {}
 
-        for repo in GITHUB_REPOS:
-            log.info(f"  Checking {repo} ...")
+        async def check_repo(repo):
             try:
                 async with session.get(
                     f"{GITHUB_API}/repos/{repo}/branches/{app_id}",
                     ssl=False, timeout=aiohttp.ClientTimeout(total=15)
                 ) as r:
-                    if r.status == 404:
-                        continue
+                    if r.status == 200:
+                        branch = await r.json()
+                        date_str = branch.get("commit", {}).get("commit", {}).get("author", {}).get("date", "")
+                        return repo, branch, date_str
+            except Exception:
+                pass
+            return repo, None, ""
+
+        async def discover_repos() -> List[str]:
+            """Search GitHub for any repo containing manifests for this AppID."""
+            try:
+                query = f"{app_id}+in:path+extension:manifest"
+                async with session.get(
+                    f"{GITHUB_API}/search/code?q={query}&per_page=10",
+                    ssl=False, timeout=aiohttp.ClientTimeout(total=15)
+                ) as r:
                     if r.status != 200:
-                        log.warning(f"  ⚠ {repo}: HTTP {r.status}")
-                        continue
-                    branch = await r.json()
-            except Exception as e:
-                log.warning(f"  ⚠ {repo}: {e}")
-                continue
+                        return []
+                    data = await r.json()
+                    found = []
+                    for item in data.get("items", []):
+                        rn = item.get("repository", {}).get("full_name", "")
+                        if rn and rn not in GITHUB_REPOS:
+                            found.append(rn)
+                    if found:
+                        log.info(f"  Dynamic search found extra repo(s): {', '.join(found)}")
+                    return found
+            except Exception:
+                return []
 
-            if "commit" not in branch:
-                continue
+        repos_to_check = list(GITHUB_REPOS)
+        if github_token:  # search API needs auth to be reliable
+            repos_to_check.extend(await discover_repos())
 
-            sha      = branch["commit"]["sha"]
+        log.info(f"Checking {len(repos_to_check)} manifest source(s)...")
+        tasks = [check_repo(repo) for repo in repos_to_check]
+        results = await asyncio.gather(*tasks)
+
+        # Filter out repos where the branch wasn't found
+        valid_results = [r for r in results if r[1] is not None]
+        if not valid_results:
+            return [], {}
+
+        # Sort by commit date descending (newest first)
+        valid_results.sort(key=lambda x: x[2], reverse=True)
+
+        for repo, branch, date in valid_results:
+            log.info(f"  ✓ Using {repo} (newest version, updated {date})")
+            sha = branch["commit"]["sha"]
             tree_url = branch["commit"]["commit"]["tree"]["url"]
-            date     = branch["commit"]["commit"]["author"]["date"]
 
             try:
                 async with session.get(
@@ -335,7 +384,6 @@ async def fetch_manifests(
                         })
 
             if manifests:
-                log.info(f"  ✓ Found in {repo} — {len(manifests)} manifest(s), updated {date}")
                 return manifests, depot_keys
 
     return [], {}

@@ -12,7 +12,8 @@ pyinstaller ^
     --onefile ^
     --noconsole ^
     --name SteamUnlock ^
-    --icon NONE ^
+    --icon "%~dp0assets\app.ico" ^
+    --add-data "%~dp0assets;assets" ^
     "%~dp0SteamUnlock_GUI.pyw"
 
 if errorlevel 1 (
