@@ -1,103 +1,111 @@
 # SteamUnlock
 
-A free, open-source Steam manifest tool — a community-built alternative to SteamTools.
+Open-source Steam manifest tool. No drivers, no installer, no spyware.
+
+> **You can do anything with this project except sell it.** CC BY-NC 4.0.
 
 ---
 
-## Why this exists
+## The problem with SteamTools
 
-I was fed up with the official SteamTools. It's a closed-source Chinese app that runs a kernel driver 24/7, triggers every antivirus on the planet, and nobody can actually audit what it does. It felt like a virus on my PC, and there's a very real risk of getting banned if Valve ever decides to crack down on it.
+SteamTools is closed-source, ships a kernel driver that runs 24/7, and constantly triggers antivirus alerts. Nobody can actually read what it does. It felt like a Chinese virus sitting on my PC and there's a real ban risk if Valve ever decides to act on kernel-level hooks.
 
-So I combined a handful of open-source projects that solve pieces of this problem — manifest downloaders, key dumpers, Lua script generators — into one clean, auditable tool. Every line of code is right here. No drivers, no hidden services, no mystery.
+So I pulled together a few open-source projects that each solved one piece of this (manifest downloaders, depot key dumpers, Lua generators) and merged them into one auditable tool. Every line is in this repo.
 
-**You can do anything you want with this project except sell it.**
+---
+
+## Screenshots
+
+> **Add your own screenshots here.** Capture the floating overlay, the main window, and a successful unlock log, then drop them in a `screenshots/` folder and update these paths.
+
+```
+screenshots/overlay.png     - the floating icon on your desktop
+screenshots/main.png        - the search + unlock window
+screenshots/unlock.gif      - a full unlock flow (screen record + convert to gif)
+```
+
+![Floating overlay](screenshots/overlay.png)
+![Main window](screenshots/main.png)
+![Unlock flow](screenshots/unlock.gif)
 
 ---
 
 ## How it works
 
-Steam verifies game files against **depot manifests** — small metadata files that describe which files belong to which version of a game. The community uploads these manifests to public GitHub repositories after legitimately owning and playing a game. SteamUnlock fetches those manifests and installs them into Steam's own directories, along with a small Lua script that tells SteamTools' lightweight shim (the only closed-source piece left) which depots to load.
+Steam validates game files against depot manifests, small metadata files that map which files belong to a specific build. When someone legally owns a game they can export these manifests. The community uploads them to public GitHub repos. SteamUnlock fetches those and drops them into Steam's own directories alongside a Lua script the SteamTools shim reads on startup.
 
-### The full pipeline
+**The pipeline:**
 
-1. **Search** — query the Steam store API for game name → AppID
-2. **Discover** — check 7 known community manifest repos in parallel, plus a live GitHub search for any *new* repos that have the game's manifests (this is how brand-new uploads get found automatically)
-3. **Select** — pick the repo with the most recent commit date for that AppID branch
-4. **Download** — pull the `.manifest` files via CDN mirrors (jsDelivr, jsdmirror, etc.) with automatic fallback
-5. **Install** — write manifests to `Steam/depotcache/` and generate a `{appid}.lua` into `Steam/config/stplug-in/`
-6. **Restart Steam** — the shim picks everything up on next launch
+1. Search the Steam store API by name or AppID
+2. Hit 14 known community repos in parallel, plus a live GitHub code search for any repo we don't know about yet
+3. Pick the repo with the newest commit for that AppID branch
+4. Download `.manifest` files through CDN mirrors with fallback (jsDelivr, jsdmirror, raw.githubusercontent, etc.)
+5. Write manifests to `Steam/depotcache/` and drop a `{appid}.lua` into `Steam/config/stplug-in/`
+6. Restart Steam, done
 
 ---
 
-## Why it's better than SteamTools
+## vs SteamTools
 
 | | SteamTools | SteamUnlock |
 |---|---|---|
-| Source code | ❌ Closed source | ✅ 100% open |
-| Kernel driver | ❌ Installs one | ✅ None |
-| Background service | ❌ Runs 24/7 | ✅ None — exits when you close it |
-| Antivirus flags | ❌ Constant false positives | ✅ Clean |
-| Ban risk | ❌ Kernel-level hooks | ✅ Standard file writes only |
-| GitHub manifest search | 5 repos | ✅ 7+ repos + live search |
-| Token support | ❌ No | ✅ .env or in-app settings |
-| Standalone exe | ❌ Requires installer | ✅ Single file, no install |
+| Source code | closed | fully open |
+| Kernel driver | yes, always running | none |
+| Background service | yes | none, exits when you close it |
+| Antivirus | constant flags | clean |
+| Ban risk | kernel hooks | plain file writes |
+| Manifest repos searched | handful | 14 + live GitHub search |
+| GitHub token support | no | yes (.env or in-app) |
+| Install required | yes | single exe, double-click |
 
 ---
 
-## Does it auto-update for new games?
+## Does coverage update automatically?
 
-**Yes, for game coverage** — the community repos (ManifestAutoUpdate, ManifestHub, etc.) automatically receive new manifests when community members upload them. Every time you unlock a game SteamUnlock fetches the latest state of those repos, so coverage improves over time with zero action on your part.
+Yes. The community repos (ManifestAutoUpdate, ManifestHub, etc.) get new manifests pushed to them whenever someone uploads a game. SteamUnlock always fetches the current HEAD so you get whatever was uploaded most recently, no app update needed.
 
-**For very new or obscure games** — if a game isn't in any repo yet, SteamUnlock uses the GitHub code search API to scan *all* public repos for manifest files matching the AppID. This means even repos we've never heard of will be checked. You need a GitHub token for this to work reliably (see below).
+For games not in any known repo, SteamUnlock uses the GitHub code search API to scan every public repo for manifest files matching that AppID. This catches repos we've never heard of. A GitHub token is required for this to work reliably since the search API is auth-gated.
 
 ---
 
 ## Setup
 
-### Standalone exe (easiest)
+### Standalone (easiest)
 
-Download `SteamUnlock.exe` from [Releases](../../releases) and double-click. No installer, no Python, no dependencies.
+Grab `SteamUnlock.exe` from [Releases](../../releases). Double-click. Done.
 
-### Running from source
+### From source
 
 ```bash
-# 1. Clone
 git clone https://github.com/yourname/SteamUnlock
 cd SteamUnlock
-
-# 2. Install dependencies
 pip install aiohttp pillow
-
-# 3. Launch the GUI overlay
 pythonw SteamUnlock/SteamUnlock_GUI.pyw
+```
 
-# Or the CLI
+CLI version if you prefer the terminal:
+
+```bash
 python SteamUnlock/steamunlock.py
+python SteamUnlock/steamunlock.py unlock 730
+python SteamUnlock/steamunlock.py search "elden ring"
 ```
 
-### GitHub API token (strongly recommended)
+### GitHub token
 
-Without a token you're capped at **60 API requests/hour** and searches will silently fail mid-way. A free token gives **5000/hour** and also enables the live repo discovery search for obscure games.
+Without one you get 60 API requests per hour. Searches start failing mid-way once you hit it. A free token bumps that to 5000/hr and unlocks the live repo discovery search.
 
-**Get a token:** GitHub → Settings → Developer settings → Personal access tokens → Generate new token (classic) → tick **public_repo** → copy it.
+To get one: GitHub Settings > Developer settings > Personal access tokens > New classic token. No scopes needed, public repos are readable by default.
 
-**Option A — .env file** (recommended, keeps it out of `config.json`):
+Put it in `SteamUnlock/.env`:
+
 ```
-# SteamUnlock/.env
 GITHUB_TOKEN=ghp_yourtoken
 ```
 
-**Option B — in-app Settings panel:**
-Right-click the floating icon → Settings → paste your token → optionally tick "Save to .env".
+Or paste it directly in the app: right-click the overlay icon > Settings.
 
-**Option C — config.json** (auto-generated on first run):
-```json
-{ "github_token": "ghp_yourtoken" }
-```
-
----
-
-## Building the exe yourself
+### Building the exe yourself
 
 ```bash
 pip install pyinstaller
@@ -105,23 +113,21 @@ cd SteamUnlock
 build_exe.bat
 ```
 
-Output: `SteamUnlock/dist/SteamUnlock.exe` — single file, fully standalone.
+Outputs `SteamUnlock/dist/SteamUnlock.exe`, single file, no Python needed on the target machine.
 
 ---
 
-## Libraries and tools used
+## Stack
 
-- **Python 3** — core language
-- **aiohttp** — async HTTP for parallel manifest fetching and GitHub API calls
-- **tkinter** — GUI (ships with Python, no extra install)
-- **Pillow / cairosvg** — used at build time to rasterize icons extracted from the SteamTools binary
-- **PyInstaller** — packages everything into the standalone exe
-- Community manifest repos: SteamAutoCracks/ManifestHub, ikun0014/ManifestHub, Auiowu/ManifestAutoUpdate, tymolu233/ManifestAutoUpdate-fix, wxy1343/ManifestAutoUpdate, Fairyvmos/bruh-hub, hansaes/ManifestAutoUpdate
+- **Python 3** with `aiohttp` for async parallel fetching across all repos simultaneously
+- **tkinter** for the GUI (no extra install, ships with Python)
+- **Pillow** for icon rendering
+- **PyInstaller** to bundle it all into the standalone exe
+
+Manifest sources: SteamAutoCracks/ManifestHub, ikun0014/ManifestHub, Masaiki/ManifestAutoUpdate, Auiowu/ManifestAutoUpdate, tymolu233/ManifestAutoUpdate-fix, wxy1343/ManifestAutoUpdate, hansaes/ManifestAutoUpdate, cyao2q/ManifestAutoUpdate, reindex-ot/ManifestAutoUpdate, isKoi/ManifestAutoUpdate, Cyberbolt/ManifestAutoUpdate, Fairyvmos/bruh-hub, ManifestAutoUpdate/ManifestAutoUpdate, Cracko298/ManifestHub
 
 ---
 
 ## License
 
-**CC BY-NC 4.0** — free to use, modify, and share. **You cannot sell this.**
-
-See [LICENSE](LICENSE) for the full text.
+CC BY-NC 4.0. Use it, modify it, share it, fork it. Just don't sell it.
