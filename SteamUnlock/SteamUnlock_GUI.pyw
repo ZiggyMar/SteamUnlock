@@ -34,13 +34,23 @@ def asset_path(*parts) -> str:
 UI_FONT  = "Arial"   # SteamTools' UI font (from its Qt stylesheet)
 
 GITHUB_REPOS = [
+    # ManifestHub forks (large curated collections)
     "SteamAutoCracks/ManifestHub",
     "ikun0014/ManifestHub",
+    # ManifestAutoUpdate forks (auto-updated community uploads)
+    "Masaiki/ManifestAutoUpdate",       # one of the largest
     "Auiowu/ManifestAutoUpdate",
     "tymolu233/ManifestAutoUpdate-fix",
     "wxy1343/ManifestAutoUpdate",
-    "Fairyvmos/bruh-hub",
     "hansaes/ManifestAutoUpdate",
+    "cyao2q/ManifestAutoUpdate",
+    "reindex-ot/ManifestAutoUpdate",
+    "isKoi/ManifestAutoUpdate",
+    "Cyberbolt/ManifestAutoUpdate",
+    # Other community repos
+    "Fairyvmos/bruh-hub",
+    "ManifestAutoUpdate/ManifestAutoUpdate",
+    "Cracko298/ManifestHub",
 ]
 
 CDN_TEMPLATES = [
@@ -410,9 +420,8 @@ async def unlock_app(app_id: str, cfg: dict, log_cb) -> bool:
 
     if not manifests:
         log_cb(f"No manifests found for {app_id} in any of the {len(GITHUB_REPOS)} repos.", "error")
-        log_cb("This game hasn't been uploaded to the community manifest repos yet", "dim")
-        log_cb("(common for brand-new or very obscure titles). Try again later, or", "dim")
-        log_cb("add a GitHub token in Settings if you're hitting rate limits.", "dim")
+        log_cb("Tips: add a GitHub token in Settings (enables live search of ALL public repos),", "dim")
+        log_cb("or wait a day — community repos auto-update as people upload.", "dim")
         return False
 
     steam_path = get_steam_path(cfg)

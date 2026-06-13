@@ -36,11 +36,23 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 
 # GitHub repos searched in priority order (same list as Onekey/SteamToolbox)
 GITHUB_REPOS = [
+    # ManifestHub forks (large curated collections)
     "SteamAutoCracks/ManifestHub",
     "ikun0014/ManifestHub",
+    # ManifestAutoUpdate forks (auto-updated community uploads)
+    "Masaiki/ManifestAutoUpdate",
     "Auiowu/ManifestAutoUpdate",
     "tymolu233/ManifestAutoUpdate-fix",
     "wxy1343/ManifestAutoUpdate",
+    "hansaes/ManifestAutoUpdate",
+    "cyao2q/ManifestAutoUpdate",
+    "reindex-ot/ManifestAutoUpdate",
+    "isKoi/ManifestAutoUpdate",
+    "Cyberbolt/ManifestAutoUpdate",
+    # Other community repos
+    "Fairyvmos/bruh-hub",
+    "ManifestAutoUpdate/ManifestAutoUpdate",
+    "Cracko298/ManifestHub",
 ]
 
 # CDN mirrors for raw file downloads (tried in order, with retry)
