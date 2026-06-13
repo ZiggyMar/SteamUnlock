@@ -509,13 +509,21 @@ def get_launch_with_steam() -> bool:
 def set_launch_with_steam(value: bool) -> bool:
     try:
         import winreg
-        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                           r"Software\Microsoft\Windows\CurrentVersion\Run", 0,
-                           winreg.KEY_SET_VALUE)
+        k = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
+                               r"Software\Microsoft\Windows\CurrentVersion\Run",
+                               0, winreg.KEY_SET_VALUE)
         if value:
-            exe = sys.executable if getattr(sys, "frozen", False) else \
-                  f'pythonw "{Path(__file__).parent / "SteamUnlock_GUI.pyw"}"'
-            winreg.SetValueEx(k, "SteamUnlock", 0, winreg.REG_SZ, exe)
+            if getattr(sys, "frozen", False):
+                # Running as compiled exe — register the exe path directly
+                exe_cmd = f'"{sys.executable}"'
+            else:
+                # Running from source — find pythonw.exe next to python.exe
+                pythonw = Path(sys.executable).with_name("pythonw.exe")
+                if not pythonw.exists():
+                    pythonw = Path(sys.executable)   # fallback to python.exe
+                script = Path(__file__).resolve()
+                exe_cmd = f'"{pythonw}" "{script}"'
+            winreg.SetValueEx(k, "SteamUnlock", 0, winreg.REG_SZ, exe_cmd)
         else:
             try:
                 winreg.DeleteValue(k, "SteamUnlock")
@@ -523,7 +531,8 @@ def set_launch_with_steam(value: bool) -> bool:
                 pass
         winreg.CloseKey(k)
         return True
-    except Exception:
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"set_launch_with_steam failed: {e}")
         return False
 
 # ─── SteamTools-style palette ─────────────────────────────────────────────────
@@ -669,7 +678,16 @@ class CustomMenu(tk.Toplevel):
             self.destroy()
             if "toggle" in it:
                 current = it["toggle"]["get"]()
-                it["toggle"]["set"](not current)
+                new_val = not current
+                ok = it["toggle"]["set"](new_val)
+                # show feedback via the app's toast (controller holds a ref to app)
+                app = self.controller.app
+                label = it.get("label", "Toggle")
+                if ok is False:
+                    app._toast(f"{label}: failed (check permissions)")
+                else:
+                    state = "ON" if new_val else "OFF"
+                    app._toast(f"{label}: {state}")
             elif "action" in it:
                 it["action"]()
                 
@@ -1088,11 +1106,26 @@ class FloatingApp:
         self.canvas = tk.Canvas(self.root, width=ICON_SIZE, height=ICON_SIZE,
                                 bg="#f3f3f3", highlightthickness=0, bd=0)
         self.canvas.pack()
-        # Load the real SteamTools logo (falls back to a drawn emblem).
+        # Load logo using Pillow for high-quality LANCZOS downscale to exact pixel size.
+        self._logo_img = None
         try:
-            self._logo_img = tk.PhotoImage(file=asset_path("logo_52.png"))
-        except Exception:
-            self._logo_img = None
+            from PIL import Image, ImageTk
+            # Prefer the largest source for sharpest downscale
+            for src in ("logo_78.png", "logo_52.png"):
+                p = asset_path(src)
+                try:
+                    img = Image.open(p).convert("RGBA")
+                    img = img.resize((ICON_SIZE, ICON_SIZE), Image.LANCZOS)
+                    self._logo_img = ImageTk.PhotoImage(img)
+                    break
+                except Exception:
+                    continue
+        except ImportError:
+            # Pillow not available — fall back to raw PhotoImage (may look pixelated)
+            try:
+                self._logo_img = tk.PhotoImage(file=asset_path("logo_52.png"))
+            except Exception:
+                pass
         # Force the override-redirect window to actually map and come to front.
         self.root.update_idletasks()
         self.root.deiconify()
@@ -1156,9 +1189,6 @@ class FloatingApp:
         s = ICON_SIZE
         if self._logo_img is not None:
             c.create_image(s // 2, s // 2, image=self._logo_img)
-            # signature green ring on hover
-            if hover:
-                c.create_oval(2, 2, s - 2, s - 2, outline=ST_GREEN, width=3)
             return
         # fallback emblem (if the logo asset is missing)
         cx, cy = s / 2, s / 2
