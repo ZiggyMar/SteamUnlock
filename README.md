@@ -41,14 +41,14 @@ Steam validates game files against depot manifests, small metadata files that ma
 
 | | SteamTools | SteamUnlock |
 |---|---|---|
-| Source code | closed | fully open |
-| Kernel driver | yes, always running | none |
-| Background service | yes | none, exits when you close it |
-| Antivirus | constant flags | clean |
-| Ban risk | kernel hooks | plain file writes |
-| Manifest repos searched | handful | 14 + live GitHub search |
-| GitHub token support | no | yes (.env or in-app) |
-| Install required | yes | single exe, double-click |
+| Source code | ❌ closed | ✅ fully open |
+| Kernel driver | ❌ yes, always running | ✅ none |
+| Background service | ❌ yes | ✅ none, exits when you close it |
+| Antivirus | ❌ constant flags | ✅ clean |
+| Ban risk | ❌ kernel hooks | ✅ plain file writes |
+| Manifest repos searched | ⚠️ handful | ✅ 14 + live GitHub search |
+| GitHub token support | ❌ no | ✅ yes (.env or in-app) |
+| Install required | ❌ yes | ✅ single exe, double-click |
 
 ---
 
