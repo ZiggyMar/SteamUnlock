@@ -79,6 +79,19 @@ def save_config(cfg: dict):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
+def apply_dark_titlebar(win):
+    """Force a dark native title bar (Windows 10/11 DWM immersive dark mode)."""
+    try:
+        import ctypes
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        val = ctypes.c_int(1)
+        for attr in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE (new, then old build)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, attr, ctypes.byref(val), ctypes.sizeof(val))
+    except Exception:
+        pass
+
 # ─── Steam path ───────────────────────────────────────────────────────────────
 
 def get_steam_path(cfg: dict) -> Optional[Path]:
@@ -411,17 +424,25 @@ def set_launch_with_steam(value: bool) -> bool:
 
 # ─── SteamTools-style palette ─────────────────────────────────────────────────
 
-ST_BG       = "#1e2127"   # panel background
-ST_BG2      = "#262a31"   # card / row background
-ST_MENU_BG  = "#23262b"   # menu background
-ST_HOVER    = "#33373f"   # hover highlight
-ST_TEXT     = "#e8eaed"
-ST_DIM      = "#8b919b"
-ST_ICON     = "#5aa9e6"   # icon accent (Steam blue)
-ST_SEP      = "#34383f"
-ST_GREEN    = "#5cb85c"
-ST_OFF      = "#4a4f57"
-ST_ACCENT   = "#1a9fff"
+# Palette extracted directly from the real SteamTools.exe Qt stylesheet:
+#   QMenu bg #2b2b2b / white text / grey (#555) selection
+#   QWidget panels #333 / QLineEdit #333 / borders #555 #666
+#   QPushButton bg #333, text #f5f5dc (cream), hover #555, radius 10px
+#   accents: blue #2a82da / #005fb8, signature green #3ad6a2, secondary #969696
+ST_BG       = "#2b2b2b"   # window / menu background
+ST_BG2      = "#333333"   # card / panel / entry background
+ST_HEADER   = "#232323"   # header / status bars
+ST_MENU_BG  = "#2b2b2b"   # menu background
+ST_HOVER    = "#555555"   # hover / selection (grey)
+ST_TEXT     = "#ffffff"   # primary text
+ST_CREAM    = "#f5f5dc"   # button text (SteamTools beige)
+ST_DIM      = "#969696"   # secondary text / icons
+ST_ICON     = "#cbcbcb"   # menu icon glyphs (light grey)
+ST_SEP      = "#3a3a3a"   # separators / subtle borders
+ST_BORDER   = "#555555"   # control borders
+ST_GREEN    = "#3ad6a2"   # SteamTools signature green (toggles / success)
+ST_OFF      = "#555555"
+ST_ACCENT   = "#2a82da"   # blue accent (links / headings)
 KEY_COLOR   = "#ff00ff"   # transparency key for the floating icon
 
 ICON_SIZE   = 78          # floating icon diameter (px)
@@ -444,7 +465,7 @@ class MenuController:
         return tk.Menu(
             self.root, tearoff=0,
             bg=ST_MENU_BG, fg=ST_TEXT,
-            activebackground=ST_ACCENT, activeforeground="white",
+            activebackground=ST_HOVER, activeforeground="white",
             disabledforeground=ST_DIM,
             bd=0, relief="flat", activeborderwidth=0,
             font=("Microsoft YaHei UI", 10),
@@ -521,37 +542,67 @@ class Workspace:
     def _build(self):
         self.win = tk.Toplevel(self.app.root)
         self.win.title("SteamUnlock")
-        self.win.configure(bg=ST_BG)
+        # Frameless dark window like SteamTools (custom title bar below).
+        self.win.overrideredirect(True)
+        self.win.configure(bg=ST_BORDER)   # acts as a 1px border
         self.win.geometry("760x560")
-        self.win.minsize(680, 480)
+        sw = self.win.winfo_screenwidth()
+        sh = self.win.winfo_screenheight()
+        self.win.geometry(f"760x560+{(sw - 760) // 2}+{(sh - 560) // 2}")
+
+        # inner container (the 1px ST_BORDER frame shows as a thin outline)
+        outer = tk.Frame(self.win, bg=ST_BG)
+        outer.pack(fill="both", expand=True, padx=1, pady=1)
+        self._outer = outer
 
         style = ttk.Style(self.win)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("ST.Treeview", background="#14171c", foreground=ST_TEXT,
-                        fieldbackground="#14171c", rowheight=26,
+        style.configure("ST.Treeview", background=ST_BG2, foreground=ST_TEXT,
+                        fieldbackground=ST_BG2, rowheight=28,
                         font=("Microsoft YaHei UI", 10), borderwidth=0)
-        style.configure("ST.Treeview.Heading", background=ST_BG2, foreground=ST_DIM,
+        style.configure("ST.Treeview.Heading", background=ST_HEADER, foreground=ST_DIM,
                         font=("Microsoft YaHei UI", 9, "bold"), borderwidth=0)
-        style.map("ST.Treeview", background=[("selected", ST_ACCENT)],
+        style.map("ST.Treeview", background=[("selected", ST_HOVER)],
                   foreground=[("selected", "white")])
         style.configure("ST.Vertical.TScrollbar", background=ST_BG2,
                         troughcolor=ST_BG, arrowcolor=ST_DIM, borderwidth=0)
 
-        # Header
-        header = tk.Frame(self.win, bg="#16191e", height=46)
+        # Custom title bar (draggable, with window controls)
+        header = tk.Frame(outer, bg=ST_HEADER, height=44)
         header.pack(fill="x")
         header.pack_propagate(False)
-        tk.Canvas(header, width=24, height=24, bg="#16191e",
-                  highlightthickness=0).pack(side="left", padx=(14, 8))
-        tk.Label(header, text="SteamUnlock", bg="#16191e", fg=ST_TEXT,
+
+        logo = tk.Canvas(header, width=26, height=26, bg=ST_HEADER,
+                         highlightthickness=0)
+        logo.pack(side="left", padx=(14, 8))
+        self._draw_mini_logo(logo, 26)
+
+        tk.Label(header, text="SteamUnlock", bg=ST_HEADER, fg=ST_TEXT,
                  font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
-        tk.Label(header, text=f"v{VERSION}", bg="#16191e", fg=ST_DIM,
+        tk.Label(header, text=f"v{VERSION}", bg=ST_HEADER, fg=ST_DIM,
                  font=("Segoe UI", 9)).pack(side="left", padx=6)
 
-        body = tk.Frame(self.win, bg=ST_BG)
+        # window control buttons (right)
+        def ctl(txt, cmd, hover_bg):
+            b = tk.Label(header, text=txt, bg=ST_HEADER, fg=ST_DIM,
+                         font=("Segoe UI", 12), width=4, cursor="hand2")
+            b.pack(side="right", fill="y")
+            b.bind("<Button-1>", lambda e: cmd())
+            b.bind("<Enter>", lambda e: b.configure(bg=hover_bg, fg="white"))
+            b.bind("<Leave>", lambda e: b.configure(bg=ST_HEADER, fg=ST_DIM))
+            return b
+        ctl("✕", self.win.destroy, "#c4314b")
+        ctl("—", lambda: self.win.withdraw(), ST_HOVER)
+
+        # make the title bar drag the window
+        for w in (header, logo):
+            w.bind("<ButtonPress-1>", self._tb_press)
+            w.bind("<B1-Motion>", self._tb_drag)
+
+        body = tk.Frame(outer, bg=ST_BG)
         body.pack(fill="both", expand=True, padx=12, pady=10)
 
         left = tk.Frame(body, bg=ST_BG)
@@ -565,16 +616,44 @@ class Workspace:
         self._build_log(right)
 
         # status
-        sb = tk.Frame(self.win, bg="#16191e", height=24)
+        sb = tk.Frame(outer, bg=ST_HEADER, height=24)
         sb.pack(fill="x", side="bottom")
         sb.pack_propagate(False)
         self.status_var = tk.StringVar(value="Ready")
-        tk.Label(sb, textvariable=self.status_var, bg="#16191e", fg=ST_DIM,
+        tk.Label(sb, textvariable=self.status_var, bg=ST_HEADER, fg=ST_DIM,
                  font=("Segoe UI", 9), anchor="w").pack(side="left", padx=12)
         steam = get_steam_path(self.cfg)
-        tk.Label(sb, text=f"Steam: {steam or 'not found'}", bg="#16191e",
+        tk.Label(sb, text=f"Steam: {steam or 'not found'}", bg=ST_HEADER,
                  fg=ST_GREEN if steam else "#d9a441",
                  font=("Segoe UI", 9)).pack(side="right", padx=12)
+
+        self.win.update_idletasks()
+        self.win.lift()
+        self.win.focus_force()
+
+    # ── frameless title-bar drag ──────────────────────────────────────────────
+    def _tb_press(self, e):
+        self._tbx, self._tby = e.x_root, e.y_root
+        self._twx, self._twy = self.win.winfo_x(), self.win.winfo_y()
+
+    def _tb_drag(self, e):
+        nx = self._twx + (e.x_root - self._tbx)
+        ny = self._twy + (e.y_root - self._tby)
+        self.win.geometry(f"+{nx}+{ny}")
+
+    def _draw_mini_logo(self, c, s):
+        cx = cy = s / 2
+        emblem = "#e6e6e6"
+        c.create_oval(1, 1, s - 1, s - 1, fill="#1d1d1d", outline="#4a4a4a", width=2)
+        r1 = s * 0.22
+        bx, by = cx - s * 0.05, cy - s * 0.05
+        c.create_oval(bx - r1, by - r1, bx + r1, by + r1, outline=emblem, width=2)
+        c.create_oval(bx - r1 * 0.4, by - r1 * 0.4,
+                      bx + r1 * 0.4, by + r1 * 0.4, fill=emblem, outline=emblem)
+        nx, ny = cx + s * 0.16, cy + s * 0.16
+        c.create_line(bx + r1 * 0.4, by + r1 * 0.4, nx, ny, fill=emblem, width=2)
+        c.create_oval(nx - s * 0.09, ny - s * 0.09,
+                      nx + s * 0.09, ny + s * 0.09, fill=emblem, outline=emblem)
 
     def _section(self, parent, title):
         card = tk.Frame(parent, bg=ST_BG2, padx=14, pady=12)
@@ -584,18 +663,23 @@ class Workspace:
         return card
 
     def _entry(self, parent):
-        e = tk.Entry(parent, bg="#14171c", fg=ST_TEXT, insertbackground=ST_TEXT,
+        e = tk.Entry(parent, bg=ST_BG2, fg=ST_TEXT, insertbackground=ST_TEXT,
                      relief="flat", font=("Microsoft YaHei UI", 11), bd=0)
         return e
 
     def _btn(self, parent, text, cmd, accent=False):
+        # SteamTools buttons: dark #333 fill with cream text, grey #555 hover.
+        # Primary actions use the signature green with dark text.
+        if accent:
+            bg, fg, hov, hfg = ST_GREEN, "#10231b", "#46e6b0", "#10231b"
+        else:
+            bg, fg, hov, hfg = ST_BG2, ST_CREAM, ST_HOVER, "white"
         b = tk.Button(parent, text=text, command=cmd, bd=0, cursor="hand2",
-                      bg=ST_ACCENT if accent else "#2f343c",
-                      fg="white" if accent else ST_TEXT,
-                      activebackground="#1688e0" if accent else "#3a4049",
-                      activeforeground="white",
+                      bg=bg, fg=fg, activebackground=hov, activeforeground=hfg,
                       font=("Microsoft YaHei UI", 10, "bold" if accent else "normal"),
-                      padx=14, pady=6)
+                      padx=16, pady=7)
+        b.bind("<Enter>", lambda e: b.configure(bg=hov, fg=hfg))
+        b.bind("<Leave>", lambda e: b.configure(bg=bg, fg=fg))
         return b
 
     def _build_search(self, parent):
@@ -658,16 +742,16 @@ class Workspace:
     def _build_log(self, parent):
         tk.Label(parent, text="LOG", bg=ST_BG2, fg=ST_DIM,
                  font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=10, pady=(10, 4))
-        self.log_text = tk.Text(parent, bg="#14171c", fg=ST_TEXT, insertbackground=ST_TEXT,
+        self.log_text = tk.Text(parent, bg="#262626", fg=ST_TEXT, insertbackground=ST_TEXT,
                                 relief="flat", font=("Consolas", 9), wrap="word",
                                 state="disabled", bd=0, padx=8, pady=6)
         self.log_text.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.log_text.tag_config("ok", foreground=ST_GREEN)
         self.log_text.tag_config("error", foreground="#f06363")
         self.log_text.tag_config("warn", foreground="#e0b341")
-        self.log_text.tag_config("info", foreground=ST_ICON)
+        self.log_text.tag_config("info", foreground=ST_ACCENT)
         self.log_text.tag_config("dim", foreground=ST_DIM)
-        self.log_text.tag_config("header", foreground=ST_ACCENT, font=("Consolas", 9, "bold"))
+        self.log_text.tag_config("header", foreground=ST_GREEN, font=("Consolas", 9, "bold"))
 
     # logging that targets this workspace
     def log(self, msg, tag=""):
@@ -772,7 +856,7 @@ class FloatingApp:
         self.root.geometry(f"{ICON_SIZE}x{ICON_SIZE}+{self.ix}+{self.iy}")
 
         self.canvas = tk.Canvas(self.root, width=ICON_SIZE, height=ICON_SIZE,
-                                bg="#0d1622", highlightthickness=0, bd=0)
+                                bg="#1d1d1d", highlightthickness=0, bd=0)
         self.canvas.pack()
         # Force the override-redirect window to actually map and come to front.
         self.root.update_idletasks()
@@ -825,12 +909,13 @@ class FloatingApp:
         c.delete("all")
         s = ICON_SIZE
         cx, cy = s / 2, s / 2
-        # outer disc (Steam dark blue gradient feel)
-        ring = ST_ACCENT if hover else "#316a96"
-        c.create_oval(2, 2, s - 2, s - 2, fill="#16202d", outline=ring, width=3)
-        c.create_oval(7, 7, s - 7, s - 7, outline="#1f3346", width=1)
+        # outer disc — neutral dark badge matching the SteamTools theme,
+        # signature green ring on hover.
+        ring = ST_GREEN if hover else "#4a4a4a"
+        c.create_oval(2, 2, s - 2, s - 2, fill="#1d1d1d", outline=ring, width=3)
+        c.create_oval(7, 7, s - 7, s - 7, outline="#2c2c2c", width=1)
         # Steam emblem: large ring (head) + inner dot + pipe to small node
-        emblem = "#dfe7ee"
+        emblem = "#e6e6e6"
         r1 = s * 0.20
         # big ring upper-left of center
         bx, by = cx - s * 0.06, cy - s * 0.06
@@ -850,11 +935,11 @@ class FloatingApp:
             bub.overrideredirect(True)
             bub.attributes("-topmost", True)
             bub.configure(bg=ST_SEP)
-            inner = tk.Frame(bub, bg="#2b2f36")
+            inner = tk.Frame(bub, bg="#3a3a3a")
             inner.pack(padx=1, pady=1)
             tk.Label(inner,
                      text="Welcome Back. Double-click to open SteamUnlock,\nright-click for the menu.",
-                     bg="#2b2f36", fg=ST_TEXT, font=("Microsoft YaHei UI", 9),
+                     bg="#3a3a3a", fg=ST_TEXT, font=("Microsoft YaHei UI", 9),
                      justify="left", padx=12, pady=8).pack()
             bub.update_idletasks()
             w = bub.winfo_reqwidth()
@@ -958,7 +1043,7 @@ class FloatingApp:
             t.overrideredirect(True)
             t.attributes("-topmost", True)
             t.configure(bg=ST_SEP)
-            tk.Label(t, text=msg, bg="#2b2f36", fg=ST_TEXT,
+            tk.Label(t, text=msg, bg="#3a3a3a", fg=ST_TEXT,
                      font=("Microsoft YaHei UI", 9), padx=14, pady=8).pack(padx=1, pady=1)
             t.update_idletasks()
             w = t.winfo_reqwidth()
@@ -1026,19 +1111,20 @@ class FloatingApp:
 
     def open_settings(self):
         win = tk.Toplevel(self.root)
-        win.title("Settings")
+        win.title("  SteamUnlock — Settings")
         win.geometry("520x320")
         win.configure(bg=ST_BG)
         win.resizable(False, False)
         win.attributes("-topmost", True)
         win.grab_set()
+        apply_dark_titlebar(win)
 
         def lbl(t):
             tk.Label(pad, text=t, bg=ST_BG, fg=ST_DIM,
                      font=("Segoe UI", 9)).pack(anchor="w", pady=(10, 2))
 
         def entry(v=""):
-            e = tk.Entry(pad, bg="#14171c", fg=ST_TEXT, insertbackground=ST_TEXT,
+            e = tk.Entry(pad, bg=ST_BG2, fg=ST_TEXT, insertbackground=ST_TEXT,
                          relief="flat", font=("Segoe UI", 10), bd=0)
             e.pack(fill="x", ipady=6)
             e.insert(0, v)
@@ -1070,12 +1156,12 @@ class FloatingApp:
 
         br = tk.Frame(pad, bg=ST_BG)
         br.pack(fill="x", pady=(16, 0))
-        tk.Button(br, text="Save", command=save, bd=0, cursor="hand2", bg=ST_ACCENT,
-                  fg="white", activebackground="#1688e0", activeforeground="white",
-                  font=("Segoe UI", 10, "bold"), padx=16, pady=6).pack(side="right")
+        tk.Button(br, text="Save", command=save, bd=0, cursor="hand2", bg=ST_GREEN,
+                  fg="#10231b", activebackground="#46e6b0", activeforeground="#10231b",
+                  font=("Segoe UI", 10, "bold"), padx=18, pady=7).pack(side="right")
         tk.Button(br, text="Cancel", command=win.destroy, bd=0, cursor="hand2",
-                  bg="#2f343c", fg=ST_TEXT, font=("Segoe UI", 10),
-                  padx=14, pady=6).pack(side="right", padx=8)
+                  bg=ST_BG2, fg=ST_CREAM, activebackground=ST_HOVER, activeforeground="white",
+                  font=("Segoe UI", 10), padx=16, pady=7).pack(side="right", padx=8)
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
