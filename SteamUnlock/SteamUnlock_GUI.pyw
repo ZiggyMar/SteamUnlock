@@ -30,6 +30,8 @@ GITHUB_REPOS = [
     "Auiowu/ManifestAutoUpdate",
     "tymolu233/ManifestAutoUpdate-fix",
     "wxy1343/ManifestAutoUpdate",
+    "Fairyvmos/bruh-hub",
+    "hansaes/ManifestAutoUpdate",
 ]
 
 CDN_TEMPLATES = [
@@ -49,6 +51,27 @@ DEFAULT_CONFIG = {
     "steam_path": "",
     "output_mode": "auto",
 }
+
+def extract_appid(text: str) -> Optional[str]:
+    """Pull a Steam AppID out of a raw string, store/SteamDB URL, or steam:// link.
+    Examples:
+      https://store.steampowered.com/app/2592160/Dispatch/  -> 2592160
+      https://steamdb.info/app/730/                          -> 730
+      steam://run/440                                        -> 440
+      2592160                                                -> 2592160
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    m = re.search(r"/app/(\d+)", text)          # store / steamdb / community URLs
+    if m:
+        return m.group(1)
+    m = re.search(r"steam://\w+/(\d+)", text)    # steam:// protocol links
+    if m:
+        return m.group(1)
+    if text.isdigit():                           # bare AppID
+        return text
+    return None
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
 
@@ -317,7 +340,10 @@ async def unlock_app(app_id: str, cfg: dict, log_cb) -> bool:
     manifests, depot_keys = await fetch_manifests(app_id, cfg.get("github_token", ""), log_cb)
 
     if not manifests:
-        log_cb(f"No manifests found for {app_id}", "error")
+        log_cb(f"No manifests found for {app_id} in any of the {len(GITHUB_REPOS)} repos.", "error")
+        log_cb("This game hasn't been uploaded to the community manifest repos yet", "dim")
+        log_cb("(common for brand-new or very obscure titles). Try again later, or", "dim")
+        log_cb("add a GitHub token in Settings if you're hitting rate limits.", "dim")
         return False
 
     steam_path = get_steam_path(cfg)
@@ -688,9 +714,13 @@ class Workspace:
         row.pack(fill="x", pady=(6, 0))
         self.search_var = tk.StringVar()
         self.search_entry = self._entry(row)
+        self.search_entry.configure(textvariable=self.search_var)
         self.search_entry.pack(side="left", fill="x", expand=True, ipady=7, padx=(0, 8))
         self.search_entry.bind("<Return>", lambda e: self._do_search())
         self._btn(row, "Search", self._do_search, accent=True).pack(side="left")
+        # hint
+        tk.Label(card, text="Type a game name, or paste an AppID / store URL",
+                 bg=ST_BG2, fg=ST_DIM, font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
 
         tf = tk.Frame(card, bg=ST_BG2)
         tf.pack(fill="both", expand=True, pady=(10, 0))
@@ -715,7 +745,7 @@ class Workspace:
                  fg=ST_DIM, font=("Segoe UI", 9)).pack(side="left")
 
     def _build_quick(self, parent):
-        card = self._section(parent, "QUICK UNLOCK BY APPID")
+        card = self._section(parent, "QUICK UNLOCK BY APPID / URL")
         row = tk.Frame(card, bg=ST_BG2)
         row.pack(fill="x", pady=(6, 0))
         self.quick_var = tk.StringVar()
@@ -774,6 +804,25 @@ class Workspace:
         term = self.search_var.get().strip()
         if not term:
             return
+
+        # If the input is an AppID or a pasted Steam/SteamDB URL, jump straight
+        # to that game instead of doing a name search.
+        appid = extract_appid(term)
+        if appid:
+            self.log(f"Detected AppID {appid} from input", "header")
+
+            def _resolved(name):
+                for r in self.tree.get_children():
+                    self.tree.delete(r)
+                row = self.tree.insert("", "end",
+                                       values=(appid, name or f"App {appid}"))
+                self.tree.selection_set(row)
+                self.tree.focus(row)
+                self.log(f"Ready: {name or appid} — click 'Unlock Selected'.", "ok")
+
+            self.app.run_async(resolve_name(appid), _resolved)
+            return
+
         self.log(f'Searching: "{term}"', "header")
 
         def _done(results):
@@ -797,9 +846,13 @@ class Workspace:
         self.app.start_unlock(str(appid), self)
 
     def _do_quick(self):
-        appid = self.quick_var.get().strip()
-        if not appid.isdigit():
-            messagebox.showerror("Invalid", "AppID must be numbers only.")
+        raw = self.quick_var.get().strip()
+        appid = extract_appid(raw)
+        if not appid:
+            messagebox.showerror(
+                "Invalid input",
+                "Enter a Steam AppID (e.g. 730) or paste a store URL like\n"
+                "https://store.steampowered.com/app/730/")
             return
         self.log(f"Quick unlock: {appid}", "header")
         self.app.start_unlock(appid, self)
