@@ -16,9 +16,11 @@ So I pulled together a few open-source projects that each solved one piece of th
 
 ## Screenshots
 
-![Floating overlay](screenshots/overlay.png)
+| Overlay icon | Right-click menu |
+|:---:|:---:|
+| ![Overlay icon](screenshots/overlay.png) | ![Right-click menu](screenshots/menu.png) |
+
 ![Main window](screenshots/main.png)
-![Unlock flow](screenshots/unlock.gif)
 
 ---
 
