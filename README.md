@@ -16,14 +16,6 @@ So I pulled together a few open-source projects that each solved one piece of th
 
 ## Screenshots
 
-> **Add your own screenshots here.** Capture the floating overlay, the main window, and a successful unlock log, then drop them in a `screenshots/` folder and update these paths.
-
-```
-screenshots/overlay.png     - the floating icon on your desktop
-screenshots/main.png        - the search + unlock window
-screenshots/unlock.gif      - a full unlock flow (screen record + convert to gif)
-```
-
 ![Floating overlay](screenshots/overlay.png)
 ![Main window](screenshots/main.png)
 ![Unlock flow](screenshots/unlock.gif)
